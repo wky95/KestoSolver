@@ -6,14 +6,17 @@
     <title>Kesto Puzzle Solver</title>
     <!-- ?v= is a cache buster: bump it whenever css/js changes, otherwise
          browsers keep serving the old file even after index.html updates. -->
-    <link rel="stylesheet" href="style.css?v=4">
+    <link rel="stylesheet" href="style.css?v=5">
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
 </head>
 <body>
     <div class="app-container">
-        <header>
-            <h1>Kesto <span>Solver</span></h1>
-            <p>Design your board and find the optimal solution</p>
+        <header class="app-header">
+            <div class="brand">
+                <h1 class="brand-name">Kesto<span>Solver</span></h1>
+                <p class="brand-tag">Design your board and find the optimal solution</p>
+            </div>
+            <div class="puzzle-badge hidden" id="puzzle-badge"></div>
         </header>
 
         <main>
@@ -109,8 +112,8 @@
         </main>
     </div>
 
-    <script src="solver.js?v=4"></script>
-    <script src="kesto-api.js?v=4"></script>
-    <script src="app.js?v=4"></script>
+    <script src="solver.js?v=5"></script>
+    <script src="kesto-api.js?v=5"></script>
+    <script src="app.js?v=5"></script>
 </body>
 </html>

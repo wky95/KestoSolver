@@ -19,6 +19,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Daily puzzle picker
     const puzzleDateInput = document.getElementById('puzzle-date');
     const puzzleMessage = document.getElementById('puzzle-message');
+    const puzzleBadge = document.getElementById('puzzle-badge');
     const btnLoadPuzzle = document.getElementById('btn-load-puzzle');
     const btnDayPrev = document.getElementById('btn-day-prev');
     const btnDayNext = document.getElementById('btn-day-next');
@@ -238,6 +239,8 @@ document.addEventListener('DOMContentLoaded', () => {
         clearBlockEntities();
         solverMessage.textContent = "Board cleared.";
         solverMessage.style.color = "var(--text-secondary)";
+        // The board is no longer that day's puzzle, so drop the id badge.
+        puzzleBadge.classList.add('hidden');
 
         for (let r = 0; r < 8; r++) {
             for (let c = 0; c < 8; c++) {
@@ -434,6 +437,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 note += ' This one is large - the solver may not crack it even on Thorough.';
             }
             setPuzzleMessage(note, "#00ff88");
+            puzzleBadge.textContent = `#${puzzle.id}`;
+            puzzleBadge.classList.remove('hidden');
         } catch (err) {
             setPuzzleMessage(err.message, "#ff2a6d");
         } finally {

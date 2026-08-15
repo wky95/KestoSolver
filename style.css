@@ -44,27 +44,47 @@ body {
     gap: 2rem;
 }
 
-header {
-    text-align: center;
+/* Mirrors the Kesto app's own header: compact, left-aligned wordmark with the
+   puzzle id alongside it, rather than a centred banner. */
+.app-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+    padding-bottom: 1.25rem;
+    border-bottom: 1px solid var(--border-color);
 }
 
-header h1 {
-    font-size: 3rem;
+.brand-name {
+    font-size: 2.1rem;
     font-weight: 800;
-    letter-spacing: -1px;
-    text-transform: uppercase;
-    text-shadow: 0 0 20px rgba(255,255,255,0.1);
+    letter-spacing: -0.03em;
+    line-height: 1;
 }
 
-header h1 span {
+.brand-name span {
     color: var(--primary-color);
-    text-shadow: 0 0 20px var(--primary-glow);
+    margin-left: 0.3rem;
 }
 
-header p {
+.brand-tag {
     color: var(--text-secondary);
-    font-size: 1.1rem;
-    margin-top: 0.5rem;
+    font-size: 0.9rem;
+    font-weight: 300;
+    margin-top: 0.45rem;
+}
+
+.puzzle-badge {
+    font-size: 0.85rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--primary-color);
+    background: rgba(252, 180, 80, 0.12);
+    border: 1px solid rgba(252, 180, 80, 0.3);
+    border-radius: 999px;
+    padding: 0.4rem 0.95rem;
+    white-space: nowrap;
 }
 
 main {
@@ -127,8 +147,8 @@ h2, h3 {
 
 .tool-btn.active {
     border-color: var(--primary-color);
-    background: rgba(0, 240, 255, 0.1);
-    box-shadow: 0 0 15px rgba(0, 240, 255, 0.2);
+    background: rgba(252, 180, 80, 0.1);
+    box-shadow: 0 0 15px var(--primary-glow);
 }
 
 .preview {
@@ -242,8 +262,8 @@ h2, h3 {
 
 .strength-btn.active {
     border-color: var(--primary-color);
-    background: rgba(0, 240, 255, 0.1);
-    box-shadow: 0 0 15px rgba(0, 240, 255, 0.2);
+    background: rgba(252, 180, 80, 0.1);
+    box-shadow: 0 0 15px var(--primary-glow);
 }
 
 .strength-name {
@@ -282,7 +302,7 @@ h2, h3 {
 }
 
 .action-btn.primary:hover {
-    background: #fff;
+    background: #ffc978;
     box-shadow: 0 0 25px var(--primary-glow);
     transform: translateY(-2px);
 }
@@ -443,6 +463,10 @@ h2, h3 {
     main {
         flex-direction: column;
         align-items: center;
+    }
+
+    .brand-name {
+        font-size: 1.7rem;
     }
     
     .sidebar {
