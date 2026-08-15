@@ -6,7 +6,7 @@
     <title>Kesto Puzzle Solver</title>
     <!-- ?v= is a cache buster: bump it whenever css/js changes, otherwise
          browsers keep serving the old file even after index.html updates. -->
-    <link rel="stylesheet" href="style.css?v=9">
+    <link rel="stylesheet" href="style.css?v=12">
     <!-- Glory is what kestopuzzle.com itself specifies, so the solver matches
          the game. Preconnect first: the font host is a separate origin, and the
          handshake would otherwise sit in front of every text render. -->
@@ -24,38 +24,83 @@
             <div class="puzzle-badge hidden" id="puzzle-badge"></div>
         </header>
 
+        <nav class="mode-tabs" id="mode-tabs">
+            <button class="mode-tab" data-mode="edit">Edit</button>
+            <button class="mode-tab" data-mode="play">Play</button>
+            <button class="mode-tab" data-mode="solve">Solve</button>
+        </nav>
+
         <main>
             <div class="sidebar">
-                <h2>Tools</h2>
-                <div class="tools-palette">
-                    <button class="tool-btn active" data-tool=".">
-                        <div class="preview empty"></div>
-                        <span>Empty</span>
-                    </button>
-                    <button class="tool-btn" data-tool="#">
-                        <div class="preview wall"></div>
-                        <span>Wall</span>
-                    </button>
-                    <button class="tool-btn" data-tool="T">
-                        <div class="preview target"></div>
-                        <span>Target</span>
-                    </button>
-                    <button class="tool-btn" data-tool="Y">
-                        <div class="preview block"></div>
-                        <span>Block</span>
-                    </button>
+                <div class="mode-panel" data-panel="edit">
+                    <div>
+                        <h2>Tools</h2>
+                        <div class="tools-palette">
+                            <button class="tool-btn active" data-tool=".">
+                                <div class="preview empty"></div>
+                                <span>Empty</span>
+                            </button>
+                            <button class="tool-btn" data-tool="#">
+                                <div class="preview wall"></div>
+                                <span>Wall</span>
+                            </button>
+                            <button class="tool-btn" data-tool="T">
+                                <div class="preview target"></div>
+                                <span>Target</span>
+                            </button>
+                            <button class="tool-btn" data-tool="Y">
+                                <div class="preview block"></div>
+                                <span>Block</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="actions">
+                        <button id="btn-clear" class="action-btn secondary">Clear Board</button>
+                    </div>
+
+                    <p class="panel-note">
+                        Drag across the board to paint. Blocks start on the
+                        squares you mark, and the puzzle is solved when every
+                        block sits on a target.
+                    </p>
                 </div>
 
-                <div class="actions">
-                    <button id="btn-edit" class="action-btn primary hidden">Edit Board</button>
-                    <button id="btn-solve" class="action-btn primary">Solve Puzzle</button>
-                    <button id="btn-cancel" class="action-btn secondary hidden">Cancel</button>
-                    <button id="btn-clear" class="action-btn secondary">Clear Board</button>
+                <div class="mode-panel hidden" data-panel="play">
+                    <div>
+                        <h2>Your Moves</h2>
+                        <div class="move-counter">
+                            <span id="play-move-count">0</span>
+                            <span class="move-counter-label" id="play-par"></span>
+                        </div>
+                        <p id="play-message" class="panel-note">
+                            Every block moves at once. Use the arrow keys.
+                        </p>
+                    </div>
+
+                    <div class="dpad">
+                        <button class="dpad-btn dpad-up" data-dir="U" title="Up">↑</button>
+                        <button class="dpad-btn dpad-left" data-dir="L" title="Left">←</button>
+                        <button class="dpad-btn dpad-right" data-dir="R" title="Right">→</button>
+                        <button class="dpad-btn dpad-down" data-dir="D" title="Down">↓</button>
+                    </div>
+
+                    <div class="actions">
+                        <button id="btn-undo" class="action-btn secondary">Undo</button>
+                        <button id="btn-replay" class="action-btn secondary">Restart</button>
+                    </div>
                 </div>
 
-                <div class="status-panel" id="status-panel">
-                    <h3>Solver Status</h3>
-                    <p id="solver-message">Ready</p>
+                <div class="mode-panel hidden" data-panel="solve">
+                    <div class="actions">
+                        <button id="btn-solve" class="action-btn primary">Solve Puzzle</button>
+                        <button id="btn-cancel" class="action-btn secondary hidden">Cancel</button>
+                    </div>
+
+                    <div class="status-panel" id="status-panel">
+                        <h3>Solver Status</h3>
+                        <p id="solver-message">Ready</p>
+                    </div>
                 </div>
             </div>
 
@@ -99,7 +144,7 @@
                     </div>
                 </div>
 
-                <div>
+                <div class="mode-panel hidden" data-panel="solve">
                     <h2>Search Strength</h2>
                     <div class="strength-palette" id="strength-palette">
                         <button class="strength-btn" data-strength="fast">
@@ -125,8 +170,8 @@
         </main>
     </div>
 
-    <script src="solver.js?v=9"></script>
-    <script src="kesto-api.js?v=9"></script>
-    <script src="app.js?v=9"></script>
+    <script src="solver.js?v=12"></script>
+    <script src="kesto-api.js?v=12"></script>
+    <script src="app.js?v=12"></script>
 </body>
 </html>

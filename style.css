@@ -19,10 +19,10 @@
     --font-main: 'Glory', system-ui, -apple-system, sans-serif;
 
     /* Derived from viewport height so the board plus the playback panel below
-       it fit without scrolling. The 59px is the fixed chrome around the grid
-       (header, panel padding, controls); clamped so very short or very tall
-       windows still land on a usable cell. */
-    --cell-size: clamp(34px, calc(12.5vh - 59px), 58px);
+       it fit without scrolling. The 68px is the fixed chrome around the grid
+       (header, mode tabs, panel padding, controls); clamped so very short or
+       very tall windows still land on a usable cell. */
+    --cell-size: clamp(34px, calc(12.5vh - 68px), 58px);
 }
 
 * {
@@ -38,11 +38,11 @@ body {
     min-height: 100vh;
     display: flex;
     justify-content: center;
-    align-items: center;
-    /* Plain `center` overflows equally top and bottom when the content is
-       taller than the viewport, and the overflowing top is unreachable by
-       scrolling. `safe` falls back to flex-start in that case. */
-    align-items: safe center;
+    /* Deliberately not vertically centred. Centring re-anchors the whole page
+       whenever the content height changes, so switching modes or revealing the
+       solution panel would slide the header up and down. Top-aligned, nothing
+       above the change ever moves. */
+    align-items: flex-start;
 }
 
 .app-container {
@@ -100,10 +100,113 @@ body {
     white-space: nowrap;
 }
 
+.mode-tabs {
+    display: flex;
+    gap: 0.4rem;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 0.3rem;
+    align-self: flex-start;
+}
+
+.mode-tab {
+    background: transparent;
+    border: none;
+    border-radius: 9px;
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 0.9rem;
+    font-weight: 600;
+    padding: 0.5rem 1.4rem;
+    cursor: pointer;
+    transition: background 0.2s ease, color 0.2s ease;
+}
+
+.mode-tab:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.mode-tab.active {
+    background: var(--primary-color);
+    color: #000;
+}
+
+/* Each mode owns one panel per sidebar; the inactive ones are display:none, so
+   the sidebar collapses to whatever the active mode needs. */
+.mode-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+}
+
+.panel-note {
+    font-size: 0.75rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+}
+
+.move-counter {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+}
+
+.move-counter span:first-child {
+    font-size: 2.4rem;
+    font-weight: 800;
+    line-height: 1;
+    color: var(--primary-color);
+}
+
+.move-counter-label {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+/* Cross layout so the arrows map to the directions they trigger. */
+.dpad {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    grid-template-rows: repeat(3, 1fr);
+    gap: 0.4rem;
+    width: 150px;
+    align-self: center;
+}
+
+.dpad-btn {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 1.2rem;
+    aspect-ratio: 1;
+    cursor: pointer;
+    transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.dpad-btn:hover {
+    background: var(--primary-color);
+    color: #000;
+}
+
+.dpad-btn:active {
+    transform: scale(0.92);
+}
+
+.dpad-up    { grid-area: 1 / 2; }
+.dpad-left  { grid-area: 2 / 1; }
+.dpad-right { grid-area: 2 / 3; }
+.dpad-down  { grid-area: 3 / 2; }
+
 main {
     display: flex;
     gap: 1.5rem;
-    align-items: flex-start;
+    /* All three columns take the height of the tallest (the board), so a mode
+       with a shorter panel no longer shrinks its card. */
+    align-items: stretch;
     justify-content: center;
     flex-wrap: wrap;
 }
@@ -496,7 +599,9 @@ h2, h3 {
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
     display: flex;
     flex-direction: column;
-    justify-content: center;
+    /* Pinned to the top rather than centred: in Solve the right column can end
+       up taller than this one, and centring would drop the board to meet it. */
+    justify-content: flex-start;
     align-items: center;
     gap: 1.25rem;
 }
@@ -525,16 +630,21 @@ h2, h3 {
     height: var(--cell-size);
     border-radius: 12px;
     background: var(--cell-empty);
-    cursor: crosshair;
+    cursor: default;
     transition: background 0.15s ease, transform 0.1s ease;
     position: relative;
 }
 
-.cell:hover {
+/* Only Edit paints, so only Edit advertises the board as clickable. */
+body[data-mode="edit"] .cell {
+    cursor: crosshair;
+}
+
+body[data-mode="edit"] .cell:hover {
     background: rgba(255, 255, 255, 0.1);
 }
 
-.cell:active {
+body[data-mode="edit"] .cell:active {
     transform: scale(0.95);
 }
 

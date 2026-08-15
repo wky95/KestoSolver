@@ -4,8 +4,24 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnClear = document.getElementById('btn-clear');
     const btnSolve = document.getElementById('btn-solve');
     const btnCancel = document.getElementById('btn-cancel');
-    const btnEdit = document.getElementById('btn-edit');
     const solverMessage = document.getElementById('solver-message');
+
+    // Modes
+    const MODES = ['edit', 'play', 'solve'];
+    const modeTabs = document.querySelectorAll('.mode-tab');
+    const modePanels = document.querySelectorAll('.mode-panel');
+    let currentMode = 'edit';
+
+    // Play mode
+    const playMoveCount = document.getElementById('play-move-count');
+    const playPar = document.getElementById('play-par');
+    const playMessage = document.getElementById('play-message');
+    const dpadBtns = document.querySelectorAll('.dpad-btn');
+    const btnUndo = document.getElementById('btn-undo');
+    const btnReplay = document.getElementById('btn-replay');
+    let playBlocks = [];      // identity-stable list, index i owns entity i
+    let playHistory = [];     // snapshots for undo
+    let currentPar = null;    // par from the daily puzzle, null once hand-edited
     
     // Playback Controls
     const solutionControls = document.getElementById('solution-controls');
@@ -131,12 +147,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Events for drawing
                 cell.addEventListener('mousedown', (e) => {
                     e.preventDefault();
-                    if (!solutionControls.classList.contains('hidden')) return;
+                    if (currentMode !== 'edit') return;
                     isDrawing = true;
                     applyTool(r, c);
                 });
                 cell.addEventListener('mouseenter', (e) => {
-                    if (isDrawing && solutionControls.classList.contains('hidden')) {
+                    if (isDrawing && currentMode === 'edit') {
                         e.preventDefault();
                         applyTool(r, c);
                     }
@@ -175,7 +191,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function applyTool(r, c) {
-        hidePlayback();
+        discardSolution();
+        // Kesto's par belongs to Kesto's board, not to whatever this becomes.
+        currentPar = null;
         solverMessage.textContent = "Board modified. Ready to solve.";
         solverMessage.style.color = "var(--text-secondary)";
         clearBlockEntities();
@@ -209,42 +227,15 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-    // Edit Board
-    btnEdit.addEventListener('click', () => {
-        hidePlayback();
-        btnEdit.classList.add('hidden');
-        btnSolve.classList.remove('hidden');
-
-        // Update fgGrid to match the current playback step
-        const currentBlocks = playbackIdentities[currentStep] || [];
-        for (let r = 0; r < 8; r++) {
-            for (let c = 0; c < 8; c++) {
-                fgGrid[r][c] = '.';
-            }
-        }
-        currentBlocks.forEach(pos => {
-            if (pos) {
-                fgGrid[pos.r][pos.c] = 'Y';
-            }
-        });
-
-        clearBlockEntities();
-        restoreGridVisuals();
-        saveGrid();
-        solverMessage.textContent = "Edit mode. Ready to solve.";
-        solverMessage.style.color = "var(--text-secondary)";
-    });
-
     // Clear Board
     btnClear.addEventListener('click', () => {
-        hidePlayback();
-        btnEdit.classList.add('hidden');
-        btnSolve.classList.remove('hidden');
+        discardSolution();
         clearBlockEntities();
         solverMessage.textContent = "Board cleared.";
         solverMessage.style.color = "var(--text-secondary)";
         // The board is no longer that day's puzzle, so drop the id badge.
         puzzleBadge.classList.add('hidden');
+        currentPar = null;
 
         for (let r = 0; r < 8; r++) {
             for (let c = 0; c < 8; c++) {
@@ -265,7 +256,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // including GitHub Pages, the worker path is used.
     function createWorker() {
         try {
-            return new Worker('solver.worker.js?v=4');
+            return new Worker('solver.worker.js?v=12');
         } catch (err) {
             console.warn('Web Worker unavailable, solving on the main thread:', err);
             return null;
@@ -288,22 +279,18 @@ document.addEventListener('DOMContentLoaded', () => {
             if (result.path.length > 0) {
                 buildPathChips(result.path);
                 solutionControls.classList.remove('hidden');
-                btnSolve.classList.add('hidden');
-                btnEdit.classList.remove('hidden');
                 stepTotalEl.textContent = result.path.length;
                 currentStep = 0;
                 computeBlockIdentities();
                 renderStep(0);
             } else {
                 // Already solved
-                hidePlayback();
+                discardSolution();
             }
         } else {
             solverMessage.textContent = result.message || "No solution found.";
             solverMessage.style.color = "#ff2a6d";
-            hidePlayback();
-            btnEdit.classList.add('hidden');
-            btnSolve.classList.remove('hidden');
+            discardSolution();
             clearBlockEntities();
             restoreGridVisuals();
         }
@@ -312,16 +299,14 @@ document.addEventListener('DOMContentLoaded', () => {
     function showFailure(text) {
         solverMessage.textContent = text;
         solverMessage.style.color = "#ff2a6d";
-        hidePlayback();
-        btnEdit.classList.add('hidden');
-        btnSolve.classList.remove('hidden');
+        discardSolution();
     }
 
     btnSolve.addEventListener('click', () => {
         const options = STRENGTH_PRESETS[currentStrength];
         const budgetSec = Math.round(options.totalTimeBudgetMs / 1000);
         solverMessage.style.color = "var(--text-primary)";
-        hidePlayback();
+        discardSolution();
 
         activeWorker = createWorker();
         setSolvingUI(true);
@@ -406,9 +391,7 @@ document.addEventListener('DOMContentLoaded', () => {
         bgGrid = newBg;
         fgGrid = newFg;
 
-        hidePlayback();
-        btnEdit.classList.add('hidden');
-        btnSolve.classList.remove('hidden');
+        discardSolution();
         playbackStates = [];
         playbackPath = [];
         playbackIdentities = [];
@@ -417,6 +400,9 @@ document.addEventListener('DOMContentLoaded', () => {
         clearBlockEntities();
         restoreGridVisuals();
         saveGrid();
+
+        // A half-played attempt belongs to the board that just went away.
+        if (currentMode === 'play') startPlay();
 
         solverMessage.textContent = "Puzzle loaded. Ready to solve.";
         solverMessage.style.color = "var(--text-secondary)";
@@ -430,9 +416,12 @@ document.addEventListener('DOMContentLoaded', () => {
         setPuzzleMessage(`Loading ${id}...`);
         try {
             const puzzle = await fetchKestoPuzzle(id);
+            const par = puzzle.stars && puzzle.stars.length ? puzzle.stars[0] : null;
+            // Set before loading, so the Play panel picks it up when
+            // loadPuzzleIntoBoard restarts the attempt.
+            currentPar = par;
             loadPuzzleIntoBoard(puzzle.bgGrid, puzzle.fgGrid);
 
-            const par = puzzle.stars && puzzle.stars.length ? puzzle.stars[0] : null;
             let note = `Loaded ${puzzle.id}`;
             if (par !== null) note += ` - par ${par} moves`;
             note += ` (${puzzle.boxCount} blocks).`;
@@ -566,11 +555,28 @@ document.addEventListener('DOMContentLoaded', () => {
         progressFill.style.width = total ? `${(stepIndex / total) * 100}%` : '0';
     }
 
-    // Every caller means "playback is going away", so the timer has to die with
-    // it or it keeps stepping a board that is no longer on screen.
+    // Takes the panel off screen but keeps the solution, so leaving Solve mode
+    // and coming back can put it right where it was. The timer has to die
+    // either way, or it keeps stepping a board nobody is looking at.
     function hidePlayback() {
         stopAutoplay();
         solutionControls.classList.add('hidden');
+    }
+
+    function hasSolution() {
+        return playbackPath.length > 0 && playbackIdentities.length > 0;
+    }
+
+    // For when the solution stops being true of the board: an edit, a new
+    // puzzle, or the start of another search.
+    function discardSolution() {
+        hidePlayback();
+        playbackStates = [];
+        playbackPath = [];
+        playbackIdentities = [];
+        currentStep = 0;
+        moveChips = [];
+        pathDisplay.replaceChildren();
     }
 
     function stopAutoplay() {
@@ -594,12 +600,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 420);
     }
 
-    function renderStep(stepIndex) {
-        currentStep = stepIndex;
-        stepCurrentEl.textContent = stepIndex;
-        updatePathHighlight(stepIndex);
-
-        // Clean grid visual blocks (hide the Y cells so block-entities can overlay them)
+    // Hides the statically painted blocks so the animated .block-entity overlays
+    // are the only blocks on screen.
+    function hideStaticBlocks() {
         for (let r = 0; r < 8; r++) {
             for (let c = 0; c < 8; c++) {
                 if (fgGrid[r][c] === 'Y') {
@@ -607,10 +610,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
         }
+    }
 
-        const blocks = playbackIdentities[stepIndex] || [];
-
-        // Ensure we have correct number of entities
+    // Shared by solution playback and Play mode: entity i keeps following block
+    // i across calls, which is what makes the CSS transition read as a slide
+    // rather than a teleport.
+    function positionBlockEntities(blocks) {
         while (blockEntities.length < blocks.length) {
             const el = document.createElement('div');
             el.className = 'block-entity';
@@ -618,36 +623,235 @@ document.addEventListener('DOMContentLoaded', () => {
             blockEntities.push(el);
         }
         while (blockEntities.length > blocks.length) {
-            const el = blockEntities.pop();
-            el.remove();
+            blockEntities.pop().remove();
         }
 
-        // Position entities
+        // Measured rather than computed from cell size, so it stays correct at
+        // any --cell-size the viewport lands on.
+        const gridRect = gridEl.getBoundingClientRect();
         blocks.forEach((pos, i) => {
-            const cell = cells[pos.r][pos.c];
             const el = blockEntities[i];
-            
-            // Calculate position relative to grid
-            // Grid gap is 4px, cell is 60px, padding is 12px
-            const left = 12 + pos.c * 64; 
-            const top = 12 + pos.r * 64;
-            
-            // For responsive layout, better to rely on cell offset relative to grid
-            const gridRect = gridEl.getBoundingClientRect();
             const cellRect = cells[pos.r][pos.c].getBoundingClientRect();
-            
+
             el.style.left = (cellRect.left - gridRect.left - 1 /* border adjust */) + 'px';
             el.style.top = (cellRect.top - gridRect.top - 1 /* border adjust */) + 'px';
             el.style.width = cellRect.width + 'px';
             el.style.height = cellRect.height + 'px';
-
-            if (bgGrid[pos.r][pos.c] === 'T') {
-                el.classList.add('on-target');
-            } else {
-                el.classList.remove('on-target');
-            }
+            el.classList.toggle('on-target', bgGrid[pos.r][pos.c] === 'T');
         });
     }
+
+    function renderStep(stepIndex) {
+        currentStep = stepIndex;
+        stepCurrentEl.textContent = stepIndex;
+        updatePathHighlight(stepIndex);
+        hideStaticBlocks();
+        positionBlockEntities(playbackIdentities[stepIndex] || []);
+    }
+
+    // --- Play mode ---
+
+    // Mirrors lineStep() in solver.js. A move shifts every block one square at
+    // once: the board splits into eight independent lines (rows for L/R, columns
+    // for U/D) and each maximal run of blocks in a line advances only if the
+    // square just past its leading block is on-board and not a wall. Diverging
+    // from this would make hand-played move counts disagree with the solver.
+    function applyMove(blocks, dir) {
+        const isRow = dir === 'L' || dir === 'R';
+        const step = (dir === 'U' || dir === 'L') ? -1 : +1;
+
+        const occupied = new Set(blocks.map(b => b.r * 8 + b.c));
+        const shifted = new Map();   // old cell index -> new cell index
+
+        for (let line = 0; line < 8; line++) {
+            const at = i => (isRow ? { r: line, c: i } : { r: i, c: line });
+            const hasBlock = i => { const p = at(i); return occupied.has(p.r * 8 + p.c); };
+            const isWall = i => { const p = at(i); return bgGrid[p.r][p.c] === '#'; };
+
+            let i = 0;
+            while (i < 8) {
+                if (!hasBlock(i)) { i++; continue; }
+                let j = i;
+                while (j + 1 < 8 && hasBlock(j + 1)) j++;
+
+                // The run's leading square in the direction of travel.
+                const lead = step > 0 ? j : i;
+                const ahead = lead + step;
+                const canMove = ahead >= 0 && ahead <= 7 && !isWall(ahead);
+
+                if (canMove) {
+                    for (let k = i; k <= j; k++) {
+                        const from = at(k);
+                        const to = at(k + step);
+                        shifted.set(from.r * 8 + from.c, to.r * 8 + to.c);
+                    }
+                }
+                i = j + 1;
+            }
+        }
+
+        if (shifted.size === 0) return null;   // move is a no-op
+
+        // Applied against the identity-carrying list, so each block keeps its
+        // entity and animates from where it was.
+        return blocks.map(b => {
+            const moved = shifted.get(b.r * 8 + b.c);
+            return moved === undefined ? b : { r: Math.floor(moved / 8), c: moved % 8 };
+        });
+    }
+
+    function blocksFromGrid() {
+        const blocks = [];
+        for (let r = 0; r < 8; r++) {
+            for (let c = 0; c < 8; c++) {
+                if (fgGrid[r][c] === 'Y') blocks.push({ r, c });
+            }
+        }
+        return blocks;
+    }
+
+    function targetCells() {
+        const targets = [];
+        for (let r = 0; r < 8; r++) {
+            for (let c = 0; c < 8; c++) {
+                if (bgGrid[r][c] === 'T') targets.push(r * 8 + c);
+            }
+        }
+        return targets;
+    }
+
+    // Matches the solver's goal test: the block set must equal the target set,
+    // so a spare block sitting off-target still counts as unsolved.
+    function isSolved(blocks) {
+        const targets = targetCells();
+        if (targets.length === 0 || targets.length !== blocks.length) return false;
+        const occupied = new Set(blocks.map(b => b.r * 8 + b.c));
+        return targets.every(t => occupied.has(t));
+    }
+
+    function setPlayMessage(text, color) {
+        playMessage.textContent = text;
+        playMessage.style.color = color || "var(--text-secondary)";
+    }
+
+    function renderPlay() {
+        hideStaticBlocks();
+        positionBlockEntities(playBlocks);
+        playMoveCount.textContent = playHistory.length;
+        btnUndo.disabled = playHistory.length === 0;
+    }
+
+    function startPlay() {
+        playBlocks = blocksFromGrid();
+        playHistory = [];
+        playPar.textContent = currentPar !== null ? `moves · par ${currentPar}` : 'moves';
+
+        if (playBlocks.length === 0) {
+            setPlayMessage("No blocks on the board. Add some in Edit mode.", "#ffb84d");
+        } else if (targetCells().length !== playBlocks.length) {
+            setPlayMessage(
+                `${playBlocks.length} blocks but ${targetCells().length} targets - this board cannot be solved.`,
+                "#ffb84d"
+            );
+        } else {
+            setPlayMessage("Every block moves at once. Use the arrow keys.");
+        }
+        renderPlay();
+    }
+
+    function doPlayMove(dir) {
+        if (currentMode !== 'play' || playBlocks.length === 0) return;
+
+        const next = applyMove(playBlocks, dir);
+        if (!next) {
+            setPlayMessage("Nothing can move that way.", "#ffb84d");
+            return;
+        }
+
+        playHistory.push(playBlocks);
+        playBlocks = next;
+        renderPlay();
+
+        if (isSolved(playBlocks)) {
+            setPlayMessage(`Solved in ${playHistory.length} moves.`, "#00ff88");
+        } else {
+            setPlayMessage("Every block moves at once. Use the arrow keys.");
+        }
+    }
+
+    function undoPlayMove() {
+        if (playHistory.length === 0) return;
+        playBlocks = playHistory.pop();
+        renderPlay();
+        setPlayMessage("Every block moves at once. Use the arrow keys.");
+    }
+
+    const KEY_DIRS = {
+        ArrowUp: 'U', ArrowDown: 'D', ArrowLeft: 'L', ArrowRight: 'R',
+        w: 'U', s: 'D', a: 'L', d: 'R',
+        W: 'U', S: 'D', A: 'L', D: 'R'
+    };
+
+    document.addEventListener('keydown', (e) => {
+        if (currentMode !== 'play') return;
+        // Leave typing in the date picker alone.
+        if (e.target instanceof HTMLInputElement) return;
+        const dir = KEY_DIRS[e.key];
+        if (!dir) return;
+        e.preventDefault();   // arrows would otherwise scroll the page
+        doPlayMove(dir);
+    });
+
+    dpadBtns.forEach(btn => {
+        btn.addEventListener('click', () => doPlayMove(btn.dataset.dir));
+    });
+
+    btnUndo.addEventListener('click', undoPlayMove);
+    btnReplay.addEventListener('click', () => {
+        startPlay();
+        setPlayMessage("Back to the start.");
+    });
+
+    // --- Mode switching ---
+
+    function setMode(mode, { updateUrl = true } = {}) {
+        if (!MODES.includes(mode)) mode = 'edit';
+
+        // Tear down whatever the outgoing mode put on the board. Play and Solve
+        // both stage positions that are not the saved board, so leaving either
+        // restores what Edit last committed. The solution itself survives - only
+        // an actual edit invalidates it - so Solve can be resumed below.
+        if (currentMode === 'solve') hidePlayback();
+        if (currentMode === 'play' || currentMode === 'solve') {
+            clearBlockEntities();
+            restoreGridVisuals();
+        }
+
+        currentMode = mode;
+        document.body.dataset.mode = mode;
+        modeTabs.forEach(t => t.classList.toggle('active', t.dataset.mode === mode));
+        modePanels.forEach(p => p.classList.toggle('hidden', p.dataset.panel !== mode));
+
+        if (mode === 'play') startPlay();
+
+        // Put the solution back on screen at the step it was left on. Runs after
+        // the panels are toggled, so the block positions measure against the
+        // layout they will actually be shown in.
+        if (mode === 'solve' && hasSolution()) {
+            solutionControls.classList.remove('hidden');
+            renderStep(currentStep);
+        }
+
+        if (updateUrl) {
+            const url = new URL(window.location.href);
+            url.searchParams.set('mode', mode);
+            history.replaceState(null, '', url);
+        }
+    }
+
+    modeTabs.forEach(tab => {
+        tab.addEventListener('click', () => setMode(tab.dataset.mode));
+    });
 
     // Handle Window Resize to reposition blocks
     window.addEventListener('resize', () => {
@@ -680,4 +884,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Init
     initGrid();
+    // ?mode= makes a mode linkable and survives a reload. Don't rewrite the URL
+    // on boot, so a plain visit stays a plain URL.
+    const requestedMode = new URLSearchParams(window.location.search).get('mode');
+    setMode(MODES.includes(requestedMode) ? requestedMode : 'edit', { updateUrl: false });
 });
