@@ -1,0 +1,466 @@
+:root {
+    --bg-color: #181818;
+    --panel-bg: rgba(38, 38, 38, 0.9);
+    --border-color: rgba(255, 255, 255, 0.05);
+    --text-primary: #ffffff;
+    --text-secondary: #a0a5b5;
+    
+    --primary-color: #fcb450;
+    --primary-glow: rgba(252, 180, 80, 0.3);
+    
+    --cell-empty: #262626;
+    --cell-wall: #595959;
+    --cell-target: transparent;
+    --cell-target-border: #5091cd;
+    --cell-block: #fcb450;
+    --cell-block-shadow: none;
+    
+    --font-main: 'Outfit', sans-serif;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background-color: var(--bg-color);
+    color: var(--text-primary);
+    font-family: var(--font-main);
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.app-container {
+    width: 100%;
+    /* Fits three columns (tools + board + search strength) side by side. */
+    max-width: 1400px;
+    padding: 2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+}
+
+header {
+    text-align: center;
+}
+
+header h1 {
+    font-size: 3rem;
+    font-weight: 800;
+    letter-spacing: -1px;
+    text-transform: uppercase;
+    text-shadow: 0 0 20px rgba(255,255,255,0.1);
+}
+
+header h1 span {
+    color: var(--primary-color);
+    text-shadow: 0 0 20px var(--primary-glow);
+}
+
+header p {
+    color: var(--text-secondary);
+    font-size: 1.1rem;
+    margin-top: 0.5rem;
+}
+
+main {
+    display: flex;
+    gap: 2rem;
+    align-items: flex-start;
+    justify-content: center;
+    flex-wrap: wrap;
+}
+
+/* Sidebar Styling */
+.sidebar {
+    background: var(--panel-bg);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--border-color);
+    border-radius: 16px;
+    padding: 2rem;
+    width: 300px;
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+}
+
+h2, h3 {
+    font-size: 1.2rem;
+    font-weight: 600;
+    margin-bottom: 1rem;
+    color: var(--text-primary);
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 0.5rem;
+}
+
+.tools-palette {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+}
+
+.tool-btn {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 1rem 0.5rem;
+    color: var(--text-primary);
+    font-family: inherit;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.tool-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    transform: translateY(-2px);
+}
+
+.tool-btn.active {
+    border-color: var(--primary-color);
+    background: rgba(0, 240, 255, 0.1);
+    box-shadow: 0 0 15px rgba(0, 240, 255, 0.2);
+}
+
+.preview {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+}
+
+.preview.empty { background: var(--cell-empty); border: 1px dashed rgba(255,255,255,0.2); }
+.preview.wall { background: var(--cell-wall); }
+.preview.target { background: var(--cell-target); border: 3px solid var(--cell-target-border); }
+.preview.block { background: var(--cell-block); border-radius: 8px; }
+
+.sidebar-right {
+    width: 240px;
+}
+
+.puzzle-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.puzzle-nav-row {
+    display: flex;
+    align-items: stretch;
+    gap: 0.4rem;
+}
+
+/* Square-ish rather than the round playback buttons, so they line up with the
+   Load button between them. */
+.puzzle-nav-row .play-btn {
+    flex-shrink: 0;
+    width: 34px;
+    height: auto;
+    border-radius: 8px;
+    font-size: 0.7rem;
+}
+
+.puzzle-nav-row #btn-load-puzzle {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+}
+
+/* Own full-width row: a native date input clips its day segment rather than
+   overflowing, so a cramped width silently hides part of the date. */
+#puzzle-date {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.9rem;
+    padding: 0.55rem 0.6rem;
+    text-align: center;
+}
+
+#puzzle-date::-webkit-calendar-picker-indicator {
+    filter: invert(1);
+    opacity: 0.6;
+    cursor: pointer;
+}
+
+#btn-load-puzzle {
+    padding: 0.7rem;
+    font-size: 0.85rem;
+}
+
+.puzzle-message {
+    font-size: 0.75rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    min-height: 2.2em;
+}
+
+.strength-palette {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.strength-note {
+    font-size: 0.75rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    margin-top: 1rem;
+}
+
+.strength-btn {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 0.7rem 0.9rem;
+    color: var(--text-primary);
+    font-family: inherit;
+    cursor: pointer;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.strength-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.strength-btn.active {
+    border-color: var(--primary-color);
+    background: rgba(0, 240, 255, 0.1);
+    box-shadow: 0 0 15px rgba(0, 240, 255, 0.2);
+}
+
+.strength-name {
+    font-weight: 600;
+    font-size: 0.95rem;
+}
+
+.strength-desc {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.actions {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.action-btn {
+    padding: 1rem;
+    border-radius: 8px;
+    font-family: inherit;
+    font-weight: 600;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.action-btn.primary {
+    background: var(--primary-color);
+    color: #000;
+    border: none;
+    box-shadow: 0 0 15px var(--primary-glow);
+}
+
+.action-btn.primary:hover {
+    background: #fff;
+    box-shadow: 0 0 25px var(--primary-glow);
+    transform: translateY(-2px);
+}
+
+.action-btn.secondary {
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+}
+
+.action-btn.secondary:hover {
+    color: #fff;
+    border-color: #fff;
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.status-panel p {
+    font-size: 0.95rem;
+    color: var(--text-secondary);
+    margin-bottom: 1rem;
+    min-height: 24px;
+}
+
+.hidden {
+    display: none !important;
+}
+
+.step-info {
+    text-align: center;
+    font-weight: 600;
+    margin-bottom: 1rem;
+}
+
+.playback {
+    display: flex;
+    justify-content: center;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+}
+
+.play-btn {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    transition: all 0.2s ease;
+}
+
+.play-btn:hover {
+    background: var(--primary-color);
+    color: #000;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 10px var(--primary-glow);
+}
+
+.path-display {
+    font-family: monospace;
+    background: rgba(0,0,0,0.3);
+    padding: 0.8rem;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    word-break: break-all;
+    max-height: 100px;
+    overflow-y: auto;
+    border: 1px solid rgba(255,255,255,0.05);
+}
+
+/* Board Styling */
+.board-container {
+    background: var(--panel-bg);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--border-color);
+    border-radius: 16px;
+    padding: 2rem;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    grid-template-rows: repeat(8, 1fr);
+    gap: 4px;
+    background: #1e1e1e;
+    padding: 12px;
+    border-radius: 16px;
+    border: 1px solid rgba(255,255,255,0.05);
+    user-select: none;
+    -webkit-user-select: none;
+    position: relative;
+}
+
+.cell {
+    width: 60px;
+    height: 60px;
+    border-radius: 12px;
+    background: var(--cell-empty);
+    cursor: crosshair;
+    transition: background 0.15s ease, transform 0.1s ease;
+    position: relative;
+}
+
+.cell:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.cell:active {
+    transform: scale(0.95);
+}
+
+.cell.wall {
+    background: var(--cell-wall);
+}
+
+.cell.target {
+    background: var(--cell-target);
+    border: 4px solid var(--cell-target-border);
+}
+
+.cell.block {
+    background: var(--cell-block);
+}
+
+.cell.target.block {
+    background-color: #5fa3df;
+    box-shadow: 0 0 15px rgba(95, 163, 223, 0.6);
+}
+
+/* We don't render block in the background natively.
+   We create a separate element for block to allow animations. */
+.block-entity {
+    position: absolute;
+    width: 60px;
+    height: 60px;
+    background: var(--cell-block);
+    border-radius: 12px;
+    transition: top 0.2s cubic-bezier(0.2, 0.8, 0.2, 1), left 0.2s cubic-bezier(0.2, 0.8, 0.2, 1), background-color 0.2s ease, box-shadow 0.2s ease;
+    z-index: 10;
+    pointer-events: none; /* Let clicks pass through to the cell */
+}
+
+.block-entity.on-target {
+    background-color: #5fa3df;
+    box-shadow: 0 0 15px rgba(95, 163, 223, 0.6);
+}
+
+/* Media Queries for Responsiveness */
+@media (max-width: 900px) {
+    main {
+        flex-direction: column;
+        align-items: center;
+    }
+    
+    .sidebar {
+        width: 100%;
+        max-width: 450px;
+    }
+    
+    .cell {
+        width: 10vw;
+        height: 10vw;
+        max-width: 50px;
+        max-height: 50px;
+    }
+    
+    .block-entity {
+        width: 10vw;
+        height: 10vw;
+        max-width: 50px;
+        max-height: 50px;
+    }
+}
