@@ -256,7 +256,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // including GitHub Pages, the worker path is used.
     function createWorker() {
         try {
-            return new Worker('solver.worker.js?v=12');
+            return new Worker('solver.worker.js?v=13');
         } catch (err) {
             console.warn('Web Worker unavailable, solving on the main thread:', err);
             return null;
@@ -641,7 +641,15 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // True only while the solution panel is the thing driving the board. Play
+    // mode also owns block entities, so stepping must not run in the background
+    // and wipe them - and with no solution loaded there is nothing to step to.
+    function playbackActive() {
+        return currentMode === 'solve' && !solutionControls.classList.contains('hidden');
+    }
+
     function renderStep(stepIndex) {
+        if (!playbackActive()) return;
         currentStep = stepIndex;
         stepCurrentEl.textContent = stepIndex;
         updatePathHighlight(stepIndex);
@@ -780,7 +788,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function undoPlayMove() {
-        if (playHistory.length === 0) return;
+        if (currentMode !== 'play' || playHistory.length === 0) return;
         playBlocks = playHistory.pop();
         renderPlay();
         setPlayMessage("Every block moves at once. Use the arrow keys.");
@@ -806,8 +814,12 @@ document.addEventListener('DOMContentLoaded', () => {
         btn.addEventListener('click', () => doPlayMove(btn.dataset.dir));
     });
 
+    // These render block overlays, which only belong on the board in Play mode.
+    // The panel being display:none already stops a real click, but that makes
+    // correctness a property of the stylesheet; guard the handlers too.
     btnUndo.addEventListener('click', undoPlayMove);
     btnReplay.addEventListener('click', () => {
+        if (currentMode !== 'play') return;
         startPlay();
         setPlayMessage("Back to the start.");
     });
