@@ -13,7 +13,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const stepTotalEl = document.getElementById('total-steps');
     const pathDisplay = document.getElementById('path-display');
     const btnPrev = document.getElementById('btn-prev');
+    const btnNext = document.getElementById('btn-next');
     const btnPlay = document.getElementById('btn-play');
+    const progressFill = document.getElementById('progress-fill');
+    let moveChips = [];
+    let autoplayTimer = null;
     const strengthBtns = document.querySelectorAll('.strength-btn');
 
     // Daily puzzle picker
@@ -171,7 +175,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function applyTool(r, c) {
-        solutionControls.classList.add('hidden');
+        hidePlayback();
         solverMessage.textContent = "Board modified. Ready to solve.";
         solverMessage.style.color = "var(--text-secondary)";
         clearBlockEntities();
@@ -207,7 +211,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Edit Board
     btnEdit.addEventListener('click', () => {
-        solutionControls.classList.add('hidden');
+        hidePlayback();
         btnEdit.classList.add('hidden');
         btnSolve.classList.remove('hidden');
 
@@ -233,7 +237,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Clear Board
     btnClear.addEventListener('click', () => {
-        solutionControls.classList.add('hidden');
+        hidePlayback();
         btnEdit.classList.add('hidden');
         btnSolve.classList.remove('hidden');
         clearBlockEntities();
@@ -282,7 +286,7 @@ document.addEventListener('DOMContentLoaded', () => {
             playbackPath = result.path;
 
             if (result.path.length > 0) {
-                pathDisplay.textContent = result.path.join(' → ');
+                buildPathChips(result.path);
                 solutionControls.classList.remove('hidden');
                 btnSolve.classList.add('hidden');
                 btnEdit.classList.remove('hidden');
@@ -292,12 +296,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 renderStep(0);
             } else {
                 // Already solved
-                solutionControls.classList.add('hidden');
+                hidePlayback();
             }
         } else {
             solverMessage.textContent = result.message || "No solution found.";
             solverMessage.style.color = "#ff2a6d";
-            solutionControls.classList.add('hidden');
+            hidePlayback();
             btnEdit.classList.add('hidden');
             btnSolve.classList.remove('hidden');
             clearBlockEntities();
@@ -308,7 +312,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function showFailure(text) {
         solverMessage.textContent = text;
         solverMessage.style.color = "#ff2a6d";
-        solutionControls.classList.add('hidden');
+        hidePlayback();
         btnEdit.classList.add('hidden');
         btnSolve.classList.remove('hidden');
     }
@@ -317,7 +321,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const options = STRENGTH_PRESETS[currentStrength];
         const budgetSec = Math.round(options.totalTimeBudgetMs / 1000);
         solverMessage.style.color = "var(--text-primary)";
-        solutionControls.classList.add('hidden');
+        hidePlayback();
 
         activeWorker = createWorker();
         setSolvingUI(true);
@@ -402,7 +406,7 @@ document.addEventListener('DOMContentLoaded', () => {
         bgGrid = newBg;
         fgGrid = newFg;
 
-        solutionControls.classList.add('hidden');
+        hidePlayback();
         btnEdit.classList.add('hidden');
         btnSolve.classList.remove('hidden');
         playbackStates = [];
@@ -513,9 +517,87 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    const MOVE_ARROWS = { L: '←', R: '→', U: '↑', D: '↓' };
+    const MOVE_NAMES = { L: 'Left', R: 'Right', U: 'Up', D: 'Down' };
+
+    // One clickable chip per move. Rebuilt only when a new solution arrives;
+    // stepping just restyles the existing chips.
+    function buildPathChips(path) {
+        pathDisplay.replaceChildren();
+        moveChips = path.map((move, i) => {
+            const chip = document.createElement('button');
+            chip.className = 'move-chip';
+            chip.title = `Move ${i + 1}: ${MOVE_NAMES[move] || move}`;
+
+            const index = document.createElement('span');
+            index.className = 'move-index';
+            index.textContent = i + 1;
+
+            const arrow = document.createElement('span');
+            arrow.className = 'move-arrow';
+            arrow.textContent = MOVE_ARROWS[move] || move;
+
+            chip.append(index, arrow);
+            // Move i+1 produces state i+1, so jumping to a chip means showing
+            // the position just after that move.
+            chip.addEventListener('click', () => {
+                stopAutoplay();
+                renderStep(i + 1);
+            });
+            pathDisplay.appendChild(chip);
+            return chip;
+        });
+    }
+
+    function updatePathHighlight(stepIndex) {
+        moveChips.forEach((chip, i) => {
+            const moveNumber = i + 1;
+            chip.classList.toggle('done', moveNumber < stepIndex);
+            chip.classList.toggle('current', moveNumber === stepIndex);
+            chip.classList.toggle('next', moveNumber === stepIndex + 1);
+        });
+
+        // Keep the action in view once the list scrolls; 'nearest' so it never
+        // drags the whole page around.
+        const focus = moveChips[stepIndex === 0 ? 0 : stepIndex - 1];
+        if (focus) focus.scrollIntoView({ block: 'nearest' });
+
+        const total = moveChips.length;
+        progressFill.style.width = total ? `${(stepIndex / total) * 100}%` : '0';
+    }
+
+    // Every caller means "playback is going away", so the timer has to die with
+    // it or it keeps stepping a board that is no longer on screen.
+    function hidePlayback() {
+        stopAutoplay();
+        solutionControls.classList.add('hidden');
+    }
+
+    function stopAutoplay() {
+        if (autoplayTimer !== null) {
+            clearInterval(autoplayTimer);
+            autoplayTimer = null;
+        }
+        btnPlay.textContent = 'Play';
+    }
+
+    function startAutoplay() {
+        // Replaying from the end would otherwise sit on the last frame.
+        if (currentStep >= playbackStates.length - 1) renderStep(0);
+        btnPlay.textContent = 'Pause';
+        autoplayTimer = setInterval(() => {
+            if (currentStep >= playbackStates.length - 1) {
+                stopAutoplay();
+                return;
+            }
+            renderStep(currentStep + 1);
+        }, 420);
+    }
+
     function renderStep(stepIndex) {
         currentStep = stepIndex;
         stepCurrentEl.textContent = stepIndex;
+        updatePathHighlight(stepIndex);
 
         // Clean grid visual blocks (hide the Y cells so block-entities can overlay them)
         for (let r = 0; r < 8; r++) {
@@ -589,8 +671,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    btnPrev.addEventListener('click', () => { prevStep(); });
-    btnPlay.addEventListener('click', () => { nextStep(); });
+    btnPrev.addEventListener('click', () => { stopAutoplay(); prevStep(); });
+    btnNext.addEventListener('click', () => { stopAutoplay(); nextStep(); });
+    btnPlay.addEventListener('click', () => {
+        if (autoplayTimer !== null) stopAutoplay();
+        else startAutoplay();
+    });
 
     // Init
     initGrid();
