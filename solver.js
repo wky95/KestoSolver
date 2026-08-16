@@ -16,6 +16,12 @@ const DIR_CHARS = ['U', 'D', 'L', 'R'];
 // Caps the best-effort sampling loop so an unlimited time budget still ends.
 const MAX_BEAM_ROUNDS = 14;
 
+// Extra time the fallback may spend once the exact search has used its whole
+// budget, as a fraction of that budget. The interface derives the worst case it
+// advertises from this same constant, so a change here cannot leave the label
+// promising something the search will not honour.
+const BEAM_TIME_SHARE = 0.5;
+
 // "Optimal solution in 1 steps" is reachable on a one-move board.
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
@@ -58,6 +64,20 @@ class StateTable {
         this.keyHi = new Uint32Array(this.capacity);
         this.slotOf = new Int32Array(this.capacity).fill(-1);
         this.growAt = (this.capacity * 3) >> 2;   // grow past 75% load
+    }
+
+    // Sizes both arrays for `n` states up front. Growing them mid-search means a
+    // reallocation plus a copy of everything so far, and neither can be
+    // interrupted - a deadline checked every few hundred nodes cannot preempt a
+    // rehash of six million entries, which is how the A* phase overran its clock
+    // by seconds. Only worth calling where the search is already known to be a
+    // hard one; on an easy board this would reserve hundreds of MB for nothing.
+    reserve(n) {
+        if (n <= 0) return;
+        let log2 = this.capacityLog2;
+        while ((1 << log2) * 0.75 < n) log2++;
+        if (log2 > this.capacityLog2) this.allocate(log2);
+        this.ensureEntryArrays(n);
     }
 
     ensureEntryArrays(minimum) {
@@ -1009,11 +1029,15 @@ class Solver {
     runAStar({ weight, nodeLimit, deadline, upperBound = Infinity, maxStates = 2000000, onProgress = null }) {
         const useSym = this.useSymmetry;
         const T = new StateTable(maxStates);
+        // Reached only after the exact search has already failed, so the board
+        // is hard and the tables will be filled; paying for them now keeps the
+        // deadline honest.
+        T.reserve(maxStates);
 
         // Cost-so-far per slot. Kept apart from the table because A* revises it
         // when a cheaper route to a known state turns up, which the shared
         // table has no notion of.
-        let gScore = new Int32Array(1024);
+        let gScore = new Int32Array(maxStates + 1);
         const ensureG = (slot) => {
             if (slot < gScore.length) return;
             const bigger = new Int32Array(Math.max(slot + 1, gScore.length * 2));
@@ -1179,15 +1203,21 @@ class Solver {
         // Timed out: keep any partial answer as the baseline to beat.
         if (bidi.status === 'solved') recordBest({ path: bidi.path, states: bidi.states });
 
-        // With no clock, the weighted passes would otherwise run to their state
-        // cap, which on Thorough is tens of millions and took minutes. A* is the
-        // weaker engine here - roughly a third of the bidirectional search's
-        // throughput, and on these boards it proves nothing - so giving it more
-        // time than the primary search already spent cannot be right. Allow it
-        // that much and no more; the beam gets the rest.
+        // A* gets a fixed share, not whatever the exact search left behind.
+        //
+        // Letting it inherit the remainder meant that when the bidirectional
+        // search bailed early on memory - 18s into a 42s slot on the 16-block
+        // board - A* took the other 42s and found nothing, pushing the whole
+        // solve past the time the interface had promised. Across the 35 real
+        // levels the ladder changes the answer on exactly one (20260614, 24
+        // steps instead of 28), so it is worth keeping but not worth an open
+        // budget.
+        //
+        // Untimed runs cap it at whatever the primary search already spent:
+        // the weaker engine should never outlast the stronger one.
         const fallbackEnd = untimed
             ? performance.now() + (performance.now() - overallStart)
-            : endTime;
+            : Math.min(endTime, performance.now() + totalTimeBudgetMs * 0.3);
 
         if (fallbackEnd > performance.now()) announce('refine');
         for (let i = 0; i < weights.length; ++i) {
@@ -1270,7 +1300,9 @@ class Solver {
             // Extra time on top of the budget, not a slice of it. Reaching here
             // means the exact search already spent everything and came back
             // empty-handed, so the choice is a longer wait or no answer.
-            const beamDeadline = untimed ? Infinity : performance.now() + totalTimeBudgetMs * 0.5;
+            const beamDeadline = untimed
+                ? Infinity
+                : performance.now() + totalTimeBudgetMs * BEAM_TIME_SHARE;
             // Starts small enough that even the shortest reserve (Fast reserves
             // ~1.2s) completes a full pass; scoring is expensive enough that a
             // wider opening round returned nothing at all on that budget.
@@ -1350,7 +1382,7 @@ class Solver {
         return {
             success: false,
             exhausted: false,
-            message: `Gave up: ${limitHint} (~${nodesExplored} nodes). A solution may still exist. ${advice}`,
+            message: `Gave up: ${limitHint} (about ${nodesExplored} nodes). A solution may still exist. ${advice}`,
             path: [],
             states: []
         };

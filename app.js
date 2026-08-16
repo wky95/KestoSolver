@@ -139,9 +139,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // will not do - on a phone Thorough is neither unlimited nor 1.6GB.
     function describeStrength(name, blurb) {
         const p = scaledPreset(name);
+        // BEAM_TIME_SHARE comes from solver.js, so this cannot claim a ceiling
+        // the search does not respect.
         const ceiling = isFinite(p.totalTimeBudgetMs)
-            ? `up to ${Math.round(p.totalTimeBudgetMs * 1.5 / 1000)}s`
-            : 'runs until it reaches ~1.6GB';
+            ? `up to ${Math.round(p.totalTimeBudgetMs * (1 + BEAM_TIME_SHARE) / 1000)}s`
+            : 'runs until it reaches about 1.6GB';
         return blurb ? `${ceiling} · ${blurb}` : ceiling;
     }
 
@@ -350,7 +352,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // including GitHub Pages, the worker path is used.
     function createWorker() {
         try {
-            return new Worker('solver.worker.js?v=28');
+            return new Worker('solver.worker.js?v=29');
         } catch (err) {
             console.warn('Web Worker unavailable, solving on the main thread:', err);
             return null;

@@ -31,7 +31,7 @@ visitor's own browser. Nothing is downloaded in bulk or stored.
 | --- | --- | --- |
 | Fast | ~3s | Handles nearly every daily puzzle |
 | Balanced | ~20s | Default |
-| Thorough | No time limit, ~1.6GB | Runs until the state cap; desktop only |
+| Thorough | No time limit, about 1.6GB | Runs to the state cap; reduced automatically on small-memory and touch devices |
 
 When the exact search spends its whole budget without proving anything, a beam
 search takes over on extra time. It finds *a* solution but cannot prove it is

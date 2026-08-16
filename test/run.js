@@ -17,6 +17,7 @@ const SUITES = [
     ['test-symmetry.js', 'mirrored positions collapse without corrupting the path', false],
     ['test-optimality.js', 'a search cut short never claims to have proven anything', true],
     ['test-levels.js', 'every real level matches the par Kesto publishes', true],
+    ['test-budget.js', 'searches finish inside the time the interface advertises', true],
 ];
 
 let failed = 0, skipped = 0;

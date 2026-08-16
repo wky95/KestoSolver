@@ -555,6 +555,52 @@ run('a large-memory desktop is untouched', () => {
     assert(options.maxStates === 30000000, `maxStates ${options.maxStates}`);
 });
 
+// The label used to be hand-written, which let it promise "no time limit" on a
+// phone that had quietly been given a 60s clock. Deriving it from the budget is
+// only worth anything if something checks the two still agree.
+run('every strength label matches the budget that strength actually gets', () => {
+    for (const device of [{}, { deviceMemory: 4 }, { coarsePointer: true }]) {
+        for (const name of ['fast', 'balanced', 'thorough']) {
+            const app = createApp({ deferTimers: true, worker: true, ...device });
+            app.document.querySelectorAll('.strength-btn')
+                .find(b => b.dataset.strength === name).fire('click');
+            app.setMode('edit'); app.paint(0, 0, 'Y'); app.paint(1, 0, 'T');
+            app.setMode('solve'); app.solve();
+
+            const options = app.sandbox.__lastWorker.lastOptions;
+            const label = app.byId.get(`${name}-desc`).textContent;
+            const where = `${name} on ${JSON.stringify(device)}`;
+
+            if (isFinite(options.totalTimeBudgetMs)) {
+                // Worst case is the budget plus the fallback's extra half.
+                const expected = Math.round(options.totalTimeBudgetMs * 1.5 / 1000);
+                const shown = /up to (\d+)s/.exec(label);
+                assert(shown, `${where}: a finite budget must show a time, got "${label}"`);
+                assert(Number(shown[1]) === expected,
+                    `${where}: label says ${shown[1]}s but the budget allows ${expected}s`);
+            } else {
+                assert(!/up to \d+s/.test(label),
+                    `${where}: an unlimited budget must not advertise a time, got "${label}"`);
+                assert(/GB|memory/i.test(label),
+                    `${where}: an unlimited budget should name what does stop it, got "${label}"`);
+            }
+        }
+    }
+});
+
+run('Thorough stops promising an unlimited search on a constrained device', () => {
+    const desktop = createApp({ deferTimers: true, worker: true });
+    assert(!/up to \d+s/.test(desktop.byId.get('thorough-desc').textContent),
+        'desktop Thorough should still be memory-bound');
+
+    for (const device of [{ deviceMemory: 4 }, { coarsePointer: true }]) {
+        const app = createApp({ deferTimers: true, worker: true, ...device });
+        const label = app.byId.get('thorough-desc').textContent;
+        assert(/up to \d+s/.test(label),
+            `${JSON.stringify(device)}: Thorough is clock-bound here, so say so: "${label}"`);
+    }
+});
+
 run('the shrunk budget still leaves a usable beam', () => {
     const { options } = thoroughOptions({ deviceMemory: 4 });
     assert(options.beamWidth >= 2000, `beamWidth ${options.beamWidth} is too small to find anything`);
