@@ -1217,7 +1217,7 @@ class Solver {
         // the weaker engine should never outlast the stronger one.
         const fallbackEnd = untimed
             ? performance.now() + (performance.now() - overallStart)
-            : endTime;   // reverted: let A* inherit whatever the exact search left
+            : Math.min(endTime, performance.now() + totalTimeBudgetMs * 0.3);
 
         if (fallbackEnd > performance.now()) announce('refine');
         for (let i = 0; i < weights.length; ++i) {
