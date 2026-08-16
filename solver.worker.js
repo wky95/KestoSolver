@@ -3,7 +3,7 @@
 // see app.js for the main-thread fallback used on file:// origins.
 // Separate fetch from the page's own script tags, so it needs its own cache
 // buster; keep the version in step with index.html.
-importScripts('solver.js?v=29');
+importScripts('solver.js?v=30');
 
 self.onmessage = (e) => {
     const { bgGrid, fgGrid, options } = e.data;

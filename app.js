@@ -50,10 +50,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // so they are likelier to find a solution and prove it optimal.
     // The bidirectional search packs states into typed arrays, so these caps are
     // far higher than the old Map-based ones. Measured on a board that exhausts
-    // the cap, thorough's 30M states peak at ~1.6GB resident: ~1.25GB of hash
-    // tables and entry arrays plus ~0.3GB of frontier arrays and growth spikes.
-    // Raising it buys almost nothing - the frontier multiplies by ~2.9 per
-    // search level, so one more level of depth would cost ~4.8GB.
+    // the cap, thorough's 30M states peak near 1.9GB resident: mostly hash
+    // tables and entry arrays, plus frontier arrays and the fallback's own
+    // tables. Raising it buys almost nothing - the frontier multiplies by about
+    // 2.9 per search level, so one more level of depth would cost several GB.
     // beamWidth is the widest fallback pass allowed, not the one always used:
     // the solver opens narrow, widens up to this cap, then re-samples at the cap
     // until the answer stops improving. Only reached once the exact search has
@@ -69,8 +69,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentStrength = localStorage.getItem('kestoStrength') || 'balanced';
     if (!STRENGTH_PRESETS[currentStrength]) currentStrength = 'balanced';
 
-    // Thorough's 30M states peak near 1.6GB resident. A desktop tab absorbs
-    // that; a phone reloads the page out from under the search. There is no
+    // Thorough's 30M states peak near 1.9GB resident, measured on the hardest
+    // board. A desktop tab absorbs that; a phone reloads the page out from
+    // under the search. There is no
     // reliable "is this a phone" signal, so use the two that exist and only
     // shrink the budget when one of them actually fires - guessing conservatively
     // would punish desktop Safari, which reports neither.
@@ -136,14 +137,14 @@ document.addEventListener('DOMContentLoaded', () => {
     // Worst case, not the exact search's share: the fallback adds half the
     // budget again when nothing can be proved. Derived from the preset the
     // device will actually get, so the label cannot promise what the search
-    // will not do - on a phone Thorough is neither unlimited nor 1.6GB.
+    // will not do - on a phone Thorough is neither unlimited nor 1.9GB.
     function describeStrength(name, blurb) {
         const p = scaledPreset(name);
         // BEAM_TIME_SHARE comes from solver.js, so this cannot claim a ceiling
         // the search does not respect.
         const ceiling = isFinite(p.totalTimeBudgetMs)
             ? `up to ${Math.round(p.totalTimeBudgetMs * (1 + BEAM_TIME_SHARE) / 1000)}s`
-            : 'runs until it reaches about 1.6GB';
+            : 'runs until it reaches about 1.9GB';
         return blurb ? `${ceiling} · ${blurb}` : ceiling;
     }
 
@@ -352,7 +353,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // including GitHub Pages, the worker path is used.
     function createWorker() {
         try {
-            return new Worker('solver.worker.js?v=29');
+            return new Worker('solver.worker.js?v=30');
         } catch (err) {
             console.warn('Web Worker unavailable, solving on the main thread:', err);
             return null;
