@@ -4,6 +4,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnClear = document.getElementById('btn-clear');
     const btnSolve = document.getElementById('btn-solve');
     const btnCancel = document.getElementById('btn-cancel');
+    const btnReveal = document.getElementById('btn-reveal');
     const solverMessage = document.getElementById('solver-message');
     const solverStats = document.getElementById('solver-stats');
 
@@ -53,9 +54,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // tables and entry arrays plus ~0.3GB of frontier arrays and growth spikes.
     // Raising it buys almost nothing - the frontier multiplies by ~2.9 per
     // search level, so one more level of depth would cost ~4.8GB.
-    // beamWidth is the widest best-effort pass allowed, not the one always used:
+    // beamWidth is the widest fallback pass allowed, not the one always used:
     // the solver opens narrow, widens up to this cap, then re-samples at the cap
-    // until the answer stops improving. Only read when Best effort is on.
+    // until the answer stops improving. Only reached once the exact search has
+    // spent its whole budget without proving anything.
     const STRENGTH_PRESETS = {
         fast:     { totalTimeBudgetMs: 3000,  maxStates: 3000000,  beamWidth: 20000 },
         balanced: { totalTimeBudgetMs: 20000, maxStates: 12000000, beamWidth: 100000 },
@@ -67,23 +69,14 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentStrength = localStorage.getItem('kestoStrength') || 'balanced';
     if (!STRENGTH_PRESETS[currentStrength]) currentStrength = 'balanced';
 
-    const beamToggle = document.getElementById('beam-toggle');
-    let bestEffort = localStorage.getItem('kestoBestEffort') === '1';
-    beamToggle.checked = bestEffort;
-    beamToggle.addEventListener('change', () => {
-        bestEffort = beamToggle.checked;
-        localStorage.setItem('kestoBestEffort', bestEffort ? '1' : '0');
-    });
-
-    // Best effort trades the optimality proof for an answer, so it is opt-in
-    // per search rather than baked into the preset.
+    // The fallback used to sit behind a switch. It was removed because turning
+    // it on could only make things worse: it carved 40% off the exact search's
+    // budget before that search had failed at anything, which on 20260613 turned
+    // a proven-optimal 36 steps into no answer at all. The exact search now
+    // keeps its whole budget and the fallback runs on extra time afterwards, so
+    // there is nothing left to opt out of.
     function solverOptions() {
-        const preset = STRENGTH_PRESETS[currentStrength];
-        return {
-            totalTimeBudgetMs: preset.totalTimeBudgetMs,
-            maxStates: preset.maxStates,
-            beamWidth: bestEffort ? preset.beamWidth : 0
-        };
+        return { ...STRENGTH_PRESETS[currentStrength] };
     }
 
     function syncStrengthButtons() {
@@ -285,7 +278,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // including GitHub Pages, the worker path is used.
     function createWorker() {
         try {
-            return new Worker('solver.worker.js?v=22');
+            return new Worker('solver.worker.js?v=27');
         } catch (err) {
             console.warn('Web Worker unavailable, solving on the main thread:', err);
             return null;
@@ -302,6 +295,22 @@ document.addEventListener('DOMContentLoaded', () => {
     let solveStartedAt = 0;
     let solveTicker = null;
     let statesSeen = null;
+    // The shortest answer the search has reported so far. Shown while it runs,
+    // and handed over intact if the search is cancelled.
+    let bestSoFar = null;
+    // Length of the answer currently on the board, so the reveal button can say
+    // whether there is anything newer to show.
+    let revealedLength = null;
+
+    // Which engine is working. On a hard board the exact pass can run for
+    // minutes with nothing to show, so naming it distinguishes "still working"
+    // from "hung", and says whether a proof is still on the table.
+    const PHASE_LABEL = {
+        exact: 'Searching for a proven-shortest answer',
+        refine: 'Still trying to prove one',
+        fallback: 'Looking for any answer, proof given up',
+    };
+    let solvePhase = null;
 
     function elapsedText() {
         const secs = (performance.now() - solveStartedAt) / 1000;
@@ -315,12 +324,16 @@ document.addEventListener('DOMContentLoaded', () => {
         const states = statesSeen === null
             ? ''
             : ` · ${statesSeen >= 1e6 ? (statesSeen / 1e6).toFixed(1) + 'M' : Math.round(statesSeen / 1000) + 'k'} states`;
-        solverStats.textContent = elapsedText() + states;
+        const n = bestSoFar === null ? null : bestSoFar.path.length;
+        const best = n === null ? '' : ` · best ${n} step${n === 1 ? '' : 's'}`;
+        solverStats.textContent = elapsedText() + states + best;
     }
 
     function startSolveTimer() {
         solveStartedAt = performance.now();
         statesSeen = null;
+        bestSoFar = null;
+        revealedLength = null;
         renderSolveStats();
         clearInterval(solveTicker);
         solveTicker = setInterval(renderSolveStats, 100);
@@ -340,9 +353,45 @@ document.addEventListener('DOMContentLoaded', () => {
         solverStats.textContent = '';
     }
 
+    // Reveal is not a pause: the worker keeps searching. It copies whatever the
+    // search has reported so far onto the board so it can be inspected and
+    // stepped through, and the search carries on improving it in the background.
+    // Cancel still means terminate.
+    function syncRevealButton(isSolving) {
+        const available = isSolving && bestSoFar !== null;
+        btnReveal.classList.toggle('hidden', !available);
+        if (!available) return;
+        const n = bestSoFar.path.length;
+        btnReveal.textContent = `Show best (${n} step${n === 1 ? '' : 's'})`;
+        // Nothing new to show once the board already holds this answer.
+        btnReveal.disabled = revealedLength !== null && revealedLength <= n;
+    }
+
+    btnReveal.addEventListener('click', () => {
+        if (!bestSoFar) return;
+        displaySolution(bestSoFar.path, bestSoFar.states);
+        revealedLength = bestSoFar.path.length;
+        syncRevealButton(activeWorker !== null);
+    });
+
     function setSolvingUI(isSolving) {
+        syncRevealButton(isSolving);
         btnSolve.classList.toggle('hidden', isSolving);
         btnCancel.classList.toggle('hidden', !isSolving || !activeWorker);
+    }
+
+    // Puts a solution on the board and in the playback panel. Used both for the
+    // search's final answer and for revealing the best one found so far while
+    // the search is still running, so the two cannot drift apart.
+    function displaySolution(path, states) {
+        playbackStates = states;
+        playbackPath = path;
+        buildPathChips(path);
+        solutionControls.classList.remove('hidden');
+        stepTotalEl.textContent = path.length;
+        currentStep = 0;
+        computeBlockIdentities();
+        renderStep(0);
     }
 
     function showResult(result) {
@@ -350,17 +399,11 @@ document.addEventListener('DOMContentLoaded', () => {
             solverMessage.textContent = result.message;
             solverMessage.style.color = result.optimal === false ? "#ffb84d" : "#00ff88";
 
-            playbackStates = result.states;
-            playbackPath = result.path;
-
             if (result.path.length > 0) {
-                buildPathChips(result.path);
-                solutionControls.classList.remove('hidden');
-                stepTotalEl.textContent = result.path.length;
-                currentStep = 0;
-                computeBlockIdentities();
-                renderStep(0);
+                displaySolution(result.path, result.states);
             } else {
+                playbackStates = result.states;
+                playbackPath = result.path;
                 // Already solved
                 discardSolution();
             }
@@ -381,6 +424,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     btnSolve.addEventListener('click', () => {
         const options = solverOptions();
+        solvePhase = null;
         const untimed = !isFinite(options.totalTimeBudgetMs);
         const limitNote = untimed
             ? 'until memory runs out - Cancel to stop'
@@ -399,6 +443,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (msg.type === 'progress') {
                     statesSeen = msg.nodes;
                     renderSolveStats();
+                    return;
+                }
+                if (msg.type === 'best') {
+                    bestSoFar = msg.best;
+                    renderSolveStats();
+                    syncRevealButton(true);
+                    return;
+                }
+                if (msg.type === 'phase') {
+                    solvePhase = msg.phase;
+                    solverMessage.textContent =
+                        `${PHASE_LABEL[msg.phase] || 'Solving'}... ${limitNote}.`;
                     return;
                 }
                 activeWorker.terminate();
@@ -451,7 +507,22 @@ document.addEventListener('DOMContentLoaded', () => {
         activeWorker = null;
         stopSolveTimer();          // keeps the elapsed figure at the moment of cancelling
         setSolvingUI(false);
-        solverMessage.textContent = "Search cancelled.";
+
+        // Cancelling used to throw the work away. Whatever the search had
+        // already found is a real solution, so hand it over rather than
+        // making the wait count for nothing.
+        if (bestSoFar) {
+            const n = bestSoFar.path.length;
+            showResult({
+                success: true,
+                optimal: false,
+                message: `Cancelled - keeping a ${n}-step solution (not proven shortest)`,
+                path: bestSoFar.path,
+                states: bestSoFar.states
+            });
+            return;
+        }
+        solverMessage.textContent = "Search cancelled before anything was found.";
         solverMessage.style.color = "var(--text-secondary)";
     });
 
@@ -521,9 +592,7 @@ document.addEventListener('DOMContentLoaded', () => {
             note += ` (${puzzle.boxCount} blocks).`;
             // Big boards blow past the search limits; warn before they wait.
             if (puzzle.boxCount > 12) {
-                note += bestEffort
-                    ? ' This one is large - expect a Best effort answer rather than a proven optimal one.'
-                    : ' This one is large - the exact search will probably give up. Turn on Best effort to get a solution anyway.';
+                note += ' This one is large - expect a solution that is not proven shortest.';
             }
             setPuzzleMessage(note, "#00ff88");
             puzzleBadge.textContent = `#${puzzle.id}`;

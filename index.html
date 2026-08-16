@@ -6,7 +6,7 @@
     <title>Kesto Puzzle Solver</title>
     <!-- ?v= is a cache buster: bump it whenever css/js changes, otherwise
          browsers keep serving the old file even after index.html updates. -->
-    <link rel="stylesheet" href="style.css?v=22">
+    <link rel="stylesheet" href="style.css?v=27">
     <!-- Glory is what kestopuzzle.com itself specifies, so the solver matches
          the game. Preconnect first: the font host is a separate origin, and the
          handshake would otherwise sit in front of every text render. -->
@@ -94,6 +94,7 @@
                 <div class="mode-panel hidden" data-panel="solve">
                     <div class="actions">
                         <button id="btn-solve" class="action-btn primary">Solve Puzzle</button>
+                        <button id="btn-reveal" class="action-btn secondary hidden">Show best</button>
                         <button id="btn-cancel" class="action-btn secondary hidden">Cancel</button>
                     </div>
 
@@ -164,28 +165,18 @@
                     <p class="strength-note">
                         Higher strength searches more states, so it is likelier to
                         find a solution and prove it optimal, but uses more time
-                        and memory.
+                        and memory. When nothing can be proved within the budget,
+                        the search runs about half as long again looking for an
+                        answer it cannot prove - results say which you got.
                     </p>
 
-                    <label class="switch-row">
-                        <input type="checkbox" id="beam-toggle" class="switch-input">
-                        <span class="switch-track"><span class="switch-thumb"></span></span>
-                        <span class="switch-text">
-                            <span class="switch-title">Best effort</span>
-                            <span class="switch-desc">
-                                If the exact search gives up, keep looking for a
-                                solution without proving it is the shortest.
-                                Results are labelled either way.
-                            </span>
-                        </span>
-                    </label>
                 </div>
             </div>
         </main>
     </div>
 
-    <script src="solver.js?v=22"></script>
-    <script src="kesto-api.js?v=22"></script>
-    <script src="app.js?v=22"></script>
+    <script src="solver.js?v=27"></script>
+    <script src="kesto-api.js?v=27"></script>
+    <script src="app.js?v=27"></script>
 </body>
 </html>

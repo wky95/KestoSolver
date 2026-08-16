@@ -1,5 +1,7 @@
-// The Best effort switch must change what the solver does, and must never
-// dress a beam result up as a proven-optimal one.
+// The beam fallback runs when the exact search cannot prove anything. It must
+// never dress its answer up as a proven-optimal one, and it must never cost the
+// exact search anything - it used to be gated behind a switch that carved 40%
+// off the exact budget up front, which could turn a proven answer into none.
 const fs = require('fs'), vm = require('vm'), path = require('path');
 const { createApp } = require('./harness');
 const ROOT = path.join(__dirname, '..');
@@ -53,34 +55,34 @@ const HARD = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'puzzle-20260815.jso
 const Solver = freshSolver();
 const BUDGET = { totalTimeBudgetMs: 4000, maxStates: 3000000 };
 
-console.log('\nBest effort switch');
+console.log('\nBeam fallback');
 
 let offResult, onResult;
 
-run('off: the hard board is reported as unsolved, not guessed at', () => {
+run('with no fallback, the hard board is reported unsolved rather than guessed at', () => {
     offResult = new Solver(HARD.bg, HARD.fg).solve({ ...BUDGET, beamWidth: 0 });
     assert(offResult.success === false, 'exact search claimed success on a board it cannot finish');
-    assert(/Best effort/.test(offResult.message), `message should point at the switch: "${offResult.message}"`);
+    assert(/higher search strength/.test(offResult.message), `unhelpful message: "${offResult.message}"`);
 });
 
-run('on: the same board returns a solution', () => {
+run('with the fallback, the same board returns a solution', () => {
     onResult = new Solver(HARD.bg, HARD.fg).solve({ ...BUDGET, beamWidth: 20000 });
-    assert(onResult.success === true, `best effort found nothing: "${onResult.message}"`);
+    assert(onResult.success === true, `the fallback found nothing: "${onResult.message}"`);
     assert(onResult.path.length > 0, 'empty path');
 });
 
-run('on: the result is never labelled optimal', () => {
+run('a fallback answer is never labelled optimal', () => {
     assert(onResult.optimal === false, 'a beam result claimed to be optimal');
     assert(!/[Oo]ptimal/.test(onResult.message), `message implies optimality: "${onResult.message}"`);
     assert(/not proven shortest/.test(onResult.message), `message must say so plainly: "${onResult.message}"`);
 });
 
-run('on: the returned path actually solves the board', () => {
+run('the returned path actually solves the board', () => {
     assert(replayReaches(HARD.bg, HARD.fg, onResult.path),
         `a ${onResult.path.length}-move path did not reach the goal`);
 });
 
-run('on: states line up with the path', () => {
+run('states line up with the path', () => {
     assert(onResult.states.length === onResult.path.length + 1,
         `${onResult.states.length} states for ${onResult.path.length} moves`);
 });
@@ -105,12 +107,12 @@ run('every board the exact search can finish keeps its optimality proof', () => 
     assert(checked >= 25, `only ${checked} boards were exercised`);
 });
 
-run('the switch does not slow down boards the exact search can finish', () => {
+run('the fallback does not slow down boards the exact search can finish', () => {
     const P = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'puzzle-20260813.json'), 'utf8'));
     const t0 = Date.now();
     new Solver(P.bg, P.fg).solve({ ...BUDGET, beamWidth: 20000 });
     const withBeam = Date.now() - t0;
-    assert(withBeam < 2000, `took ${withBeam}ms with best effort on an easy board`);
+    assert(withBeam < 2000, `took ${withBeam}ms with the fallback on an easy board`);
 });
 
 // The driver widens the beam for several rounds, then re-samples at the cap
@@ -145,19 +147,71 @@ run('sampling at the width cap gets a fresh stall allowance', () => {
         `only ${atCap} sample(s) at the cap out of ${calls.length} rounds (${calls.join(', ')})`);
 });
 
-console.log('\nSwitch wiring in the page');
+console.log('\nBudget');
 
-run('defaults to off and survives a reload', () => {
-    const a = createApp();
-    assert(a.byId.get('beam-toggle').checked !== true, 'switch defaulted to on');
-    const t = a.byId.get('beam-toggle');
-    t.checked = true; t.fire('change');
-    assert(a.store.kestoBestEffort === '1', `not persisted (got ${a.store.kestoBestEffort})`);
+// The regression this guards: the fallback used to be opt-in and reserved 40%
+// of the budget the moment it was enabled, weakening the exact search before it
+// had failed at anything. On 20260613 at the 20s budget that turned a proven
+// 36-step answer into no answer at all.
+//
+// Asserted on the deadline the exact search is handed, not on whether some board
+// happens to finish. Outcome-based versions of this test are flaky: 20260613 sits
+// about 7% inside its deadline, so it proves or fails depending on machine load,
+// which says nothing about whether the budget was split.
+run('the fallback never shortens the exact search deadline', () => {
+    const P = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'puzzle-20260613.json'), 'utf8'));
+    const BUDGET_MS = 20000;
+
+    function exactDeadlineFor(beamWidth) {
+        const solver = new Solver(P.bg, P.fg);
+        let allowance = null;
+        const real = Solver.prototype.solveBidirectional;
+        Solver.prototype.solveBidirectional = function (opts) {
+            // How long the exact search was given, relative to when it started.
+            if (allowance === null) allowance = opts.deadline - performance.now();
+            return { status: 'timeout' };        // stop here; only the budget matters
+        };
+        const realAStar = Solver.prototype.runAStar;
+        Solver.prototype.runAStar = function () { return { status: 'timeout', nodesExplored: 0 }; };
+        const realBeam = Solver.prototype.beamSearch;
+        Solver.prototype.beamSearch = function () { return { status: 'timeout' }; };
+        try {
+            solver.solve({ totalTimeBudgetMs: BUDGET_MS, maxStates: 12000000, beamWidth });
+        } finally {
+            Solver.prototype.solveBidirectional = real;
+            Solver.prototype.runAStar = realAStar;
+            Solver.prototype.beamSearch = realBeam;
+        }
+        assert(allowance !== null, 'the exact search never ran');
+        return allowance;
+    }
+
+    const alone = exactDeadlineFor(0);
+    const withFallback = exactDeadlineFor(100000);
+
+    // A few ms of drift between the two calls is measurement, not a carve-out.
+    assert(Math.abs(alone - withFallback) < 200,
+        `exact search got ${Math.round(alone)}ms alone but ${Math.round(withFallback)}ms with the fallback`);
+    // And it should be a real share of the budget, not a rounding artefact.
+    assert(alone > BUDGET_MS * 0.5,
+        `exact search only got ${Math.round(alone)}ms of a ${BUDGET_MS}ms budget`);
 });
 
-// Thorough passes Infinity as its budget. Anything that formats the budget for
-// the user has to cope with that, and the main-thread fallback (no worker, so
-// no Cancel button) must not inherit it.
+// The beam is paid for with extra time, so a board that cannot be proved takes
+// longer than the stated budget rather than eating into it.
+run('the fallback runs on time added after the budget, not taken from it', () => {
+    const P = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'puzzle-20260815.json'), 'utf8'));
+    const BUDGET_MS = 3000;
+
+    const t0 = Date.now();
+    const r = new Solver(P.bg, P.fg).solve({ totalTimeBudgetMs: BUDGET_MS, maxStates: 3000000, beamWidth: 20000 });
+    const elapsed = Date.now() - t0;
+
+    assert(r.success && !r.optimal, `expected an unproven answer, got "${r.message}"`);
+    assert(elapsed > BUDGET_MS, `finished in ${elapsed}ms, so the exact search cannot have used its ${BUDGET_MS}ms`);
+    assert(elapsed < BUDGET_MS * 2.5, `took ${elapsed}ms, far beyond budget plus the beam's half`);
+});
+
 run('Thorough reports an unlimited search without leaking "Infinity"', () => {
     // Worker path: what a real browser runs. Cancel is available, so an
     // unbounded search is safe and the message should say memory is the limit.
@@ -192,15 +246,6 @@ run('step and move counts read naturally at one', () => {
     app.dpad.D.fire('click');
     const pm = app.byId.get('play-message').textContent;
     assert(/in 1 move\b/.test(pm), `play said "${pm}"`);
-});
-
-run('a stored preference is restored on boot', () => {
-    const a = createApp();
-    const t = a.byId.get('beam-toggle');
-    t.checked = true; t.fire('change');
-    assert(a.store.kestoBestEffort === '1', 'setup failed');
-    t.checked = false; t.fire('change');
-    assert(a.store.kestoBestEffort === '0', 'turning it off was not persisted');
 });
 
 console.log(`\n${fail === 0 ? 'ALL PASSED' : 'FAILURES'} — ${pass} passed, ${fail} failed`);

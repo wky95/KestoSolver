@@ -396,6 +396,107 @@ run('editing the board clears a stale figure', () => {
         `stale timing survived an edit: "${app.byId.get('solver-stats').textContent}"`);
 });
 
+run('the best answer so far is shown while the search runs', () => {
+    const app = createApp({ deferTimers: true, worker: true });
+    solvableBoard(app);
+    app.setMode('solve');
+    app.solve();
+
+    const w = app.sandbox.__lastWorker;
+    w.onmessage({ data: { type: 'best', best: { path: ['U', 'D', 'L'], states: [] } } });
+    const txt = app.byId.get('solver-stats').textContent;
+    assert(/best 3 steps/.test(txt), `best not reported: "${txt}"`);
+
+    // Only improvements are shown, and singular reads naturally.
+    w.onmessage({ data: { type: 'best', best: { path: ['U'], states: [] } } });
+    assert(/best 1 step\b/.test(app.byId.get('solver-stats').textContent),
+        `"${app.byId.get('solver-stats').textContent}"`);
+});
+
+// A cancelled search used to throw its work away, which on Thorough could mean
+// discarding minutes of it.
+run('cancelling hands over the best answer found so far', () => {
+    const app = createApp({ deferTimers: true, worker: true });
+    solvableBoard(app);
+    app.setMode('solve');
+    app.solve();
+
+    // Stand in for the worker reporting an answer mid-search.
+    const w = app.sandbox.__lastWorker;
+    w.onmessage({ data: { type: 'best', best: { path: ['D', 'D'], states: [1n, 2n, 3n] } } });
+
+    app.byId.get('btn-cancel').fire('click');
+    const msg = app.byId.get('solver-message').textContent;
+    assert(/2-step/.test(msg), `cancel message: "${msg}"`);
+    assert(/not proven shortest/.test(msg), `must not imply optimality: "${msg}"`);
+    assert(app.panelVisible(), 'the kept solution should be steppable');
+    assert(app.chips().length === 2, `${app.chips().length} chips for a 2-move answer`);
+    invariants(app, 'after cancel with a result');
+});
+
+run('cancelling with nothing found says so plainly', () => {
+    const app = createApp({ deferTimers: true, worker: true });
+    solvableBoard(app);
+    app.setMode('solve');
+    app.solve();
+    app.byId.get('btn-cancel').fire('click');
+
+    const msg = app.byId.get('solver-message').textContent;
+    assert(/cancelled/i.test(msg), `cancel message: "${msg}"`);
+    assert(/before anything was found/.test(msg), `should say nothing was kept: "${msg}"`);
+    assert(!app.panelVisible(), 'no solution to show');
+    invariants(app, 'after empty cancel');
+});
+
+// Revealing is not pausing: the worker is untouched and keeps improving on what
+// was shown. Cancel keeps its own meaning - terminate.
+run('revealing shows the best answer without stopping the search', () => {
+    const app = createApp({ deferTimers: true, worker: true });
+    solvableBoard(app);
+    app.setMode('solve');
+    app.solve();
+
+    const w = app.sandbox.__lastWorker;
+    const reveal = app.byId.get('btn-reveal');
+    assert(reveal.classList.contains('hidden'), 'nothing to reveal before an answer exists');
+
+    w.onmessage({ data: { type: 'best', best: { path: ['D', 'D', 'R'], states: [1n, 2n, 3n, 4n] } } });
+    assert(!reveal.classList.contains('hidden'), 'reveal should appear once an answer exists');
+    assert(/3 steps/.test(reveal.textContent), `label: "${reveal.textContent}"`);
+
+    reveal.fire('click');
+    assert(app.panelVisible(), 'the revealed answer should be steppable');
+    assert(app.chips().length === 3, `${app.chips().length} chips for a 3-move answer`);
+    assert(!w.terminated, 'revealing must not stop the worker');
+    assert(reveal.disabled, 'nothing newer to show yet');
+    invariants(app, 'after reveal');
+
+    // The search improves on it; the button offers the newer answer.
+    w.onmessage({ data: { type: 'best', best: { path: ['U'], states: [1n, 2n] } } });
+    assert(!reveal.disabled, 'a shorter answer should be offered');
+    assert(/1 step\b/.test(reveal.textContent), `label: "${reveal.textContent}"`);
+
+    reveal.fire('click');
+    assert(app.chips().length === 1, `${app.chips().length} chips after revealing the shorter answer`);
+    invariants(app, 'after second reveal');
+});
+
+run('the reveal button disappears once the search ends', () => {
+    const app = createApp({ deferTimers: true, worker: true });
+    solvableBoard(app);
+    app.setMode('solve');
+    app.solve();
+
+    const w = app.sandbox.__lastWorker;
+    w.onmessage({ data: { type: 'best', best: { path: ['D'], states: [1n, 2n] } } });
+    assert(!app.byId.get('btn-reveal').classList.contains('hidden'), 'setup');
+
+    app.flushTimers();   // let the search finish
+    assert(app.byId.get('btn-reveal').classList.contains('hidden'),
+        'reveal should not linger after the final answer');
+    invariants(app, 'after finish');
+});
+
 run('cancelling keeps the elapsed reading', () => {
     const app = createApp({ deferTimers: true, worker: true });
     solvableBoard(app);
@@ -485,11 +586,6 @@ function fuzz(seed, steps) {
         ['strength', () => pick(app.document.querySelectorAll('.strength-btn')).fire('click')],
         ['resize', () => app.resize()],
         ['tool', () => pick(app.document.querySelectorAll('.tool-btn')).fire('click')],
-        ['beam', () => {
-            const t = app.byId.get('beam-toggle');
-            t.checked = !t.checked;
-            t.fire('change');
-        }],
     ];
 
     for (let i = 0; i < steps; i++) {

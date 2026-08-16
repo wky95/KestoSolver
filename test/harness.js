@@ -174,7 +174,21 @@ function createApp({ mode = null, strength = 'fast', savedGrids = null, deferTim
                         if (self.terminated || !self.onmessage) return;
                         try {
                             const solver = new Solver(data.bgGrid, data.fgGrid);
-                            const result = solver.solve(data.options);
+                            const result = solver.solve({
+                                ...data.options,
+                                // Same channel the real worker uses, so the
+                                // best-so-far display and cancelling are covered.
+                                onBest: (best) => {
+                                    if (!self.terminated && self.onmessage) {
+                                        self.onmessage({ data: { type: 'best', best } });
+                                    }
+                                },
+                                onPhase: (phase) => {
+                                    if (!self.terminated && self.onmessage) {
+                                        self.onmessage({ data: { type: 'phase', phase } });
+                                    }
+                                },
+                            });
                             self.onmessage({ data: { type: 'done', result } });
                         } catch (err) {
                             self.onmessage({ data: { type: 'error', message: err.message } });

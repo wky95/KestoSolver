@@ -33,13 +33,29 @@ visitor's own browser. Nothing is downloaded in bulk or stored.
 | Balanced | ~20s | Default |
 | Thorough | No time limit, ~1.6GB | Runs until the state cap; desktop only |
 
-**Best effort** is a separate switch. Left off, the solver either proves an
-answer optimal or reports that it could not. Turned on, a beam search takes over
-when the exact search gives up — it finds *a* solution but cannot prove it is
-the shortest, and results say so.
+When the exact search spends its whole budget without proving anything, a beam
+search takes over on extra time. It finds *a* solution but cannot prove it is
+the shortest, so a result is labelled either `Optimal solution in N steps` or
+`Found an N-step solution (not proven shortest)`.
 
-The distinction matters more than the speed: a solver that quietly overstates
+That distinction matters more than the speed: a solver that quietly overstates
 its confidence is worse than one that admits defeat.
+
+This used to be opt-in behind a "Best effort" switch, which was removed because
+it could only make things worse — see the note below.
+
+While a search runs, the status shows which engine is working, how long it has
+taken, and the shortest answer found so far:
+
+```
+Looking for any answer, proof given up...
+4m 13s · 58.1M states · best 34 steps
+```
+
+Cancel keeps that answer rather than discarding it. On a hard board this matters
+more than it sounds: on 2026-08-15 at Thorough the search reaches 34 steps after
+about four minutes and then spends five more confirming it cannot do better, so
+watching the figure and stopping is usually the right move.
 
 ## Tests
 
@@ -83,6 +99,17 @@ Recorded so the same dead ends are not explored twice. Numbers are from the
   queue, not the board representation. What it removed was a hard 2M-state cap
   that existed only because the old code kept BigInt keys in a `Map`, so the
   fallback now explores ~5x more of its budget.
+
+**Removed**
+
+- The "Best effort" switch. Enabling it reserved 40% of the budget for the beam
+  up front, weakening the exact search before it had failed at anything. Across
+  the 35 fixtures at the 20s budget that was a net loss: it rescued 2026-08-15
+  (no answer to 39 steps) but broke 2026-06-13, turning a **proven-optimal 36
+  steps into no answer at all** — the shortened exact pass could not finish and
+  the beam cannot crack that board either. The exact search now keeps its whole
+  budget and the beam runs on extra time afterwards, which leaves nothing to opt
+  out of.
 
 **Did not work, with the numbers**
 

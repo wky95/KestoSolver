@@ -1105,26 +1105,39 @@ class Solver {
             totalTimeBudgetMs = 15000,
             weights = [12, 6, 3, 2, 1],
             beamWidth = 0,
-            onProgress = null
+            onProgress = null,
+            onBest = null,
+            onPhase = null
         } = options;
 
         const overallStart = performance.now();
         // Thorough passes Infinity: search until the state cap is reached rather
         // than stopping on a clock. Every deadline below has to stay Infinity in
-        // that case - `start + Infinity - Infinity` is NaN, and a NaN deadline
-        // compares false against everything, which would silently disable the
-        // limit checks instead of removing them.
+        // that case - a NaN deadline compares false against everything, which
+        // would silently disable the limit checks instead of removing them.
         const untimed = !isFinite(totalTimeBudgetMs);
 
-        // With best-effort enabled, hold back part of the budget so the beam
-        // pass still has time to run once the exact phases have used theirs.
-        // Carved off the exact search only because it is about to fail anyway:
-        // whenever it succeeds it does so in a fraction of the budget.
-        const beamReserveMs = (beamWidth > 0 && !untimed) ? totalTimeBudgetMs * 0.4 : 0;
-        const exactBudgetMs = totalTimeBudgetMs - beamReserveMs;
+        // The exact search gets the whole budget. An earlier version carved 40%
+        // of it out for the beam up front, which weakened the exact search
+        // before it had failed at anything: on 20260613 at the 20s budget that
+        // turned a proven-optimal 36 steps into no answer at all, because the
+        // shortened exact pass could not finish and the beam could not crack
+        // that board either. The beam is a fallback, so it is paid for only
+        // once there is something to fall back from.
+        const exactBudgetMs = totalTimeBudgetMs;
         const endTime = untimed ? Infinity : overallStart + exactBudgetMs;
         let nodesExplored = 0;
+        // Every phase can improve on the last, so the caller is told as soon as
+        // an answer exists rather than only at the end. That is what makes the
+        // search interruptible: cancelling keeps whatever was reported, instead
+        // of throwing away minutes of work.
         let best = null;
+        const recordBest = (candidate) => {
+            if (!candidate) return;
+            if (best && candidate.path.length >= best.path.length) return;
+            best = candidate;
+            if (onBest) onBest({ path: best.path, states: best.states });
+        };
         let lastReason = 'time';
 
         // Both engines now pack states into the same typed arrays, so the
@@ -1133,6 +1146,12 @@ class Solver {
         // still costs more per state than plain BFS, so leave it some headroom.
         const fallbackMaxStates = Math.floor(maxStates * 0.75);
 
+        // Which engine is working. The exact pass can run for minutes on a hard
+        // board without producing anything to show, and silence is hard to tell
+        // apart from a hang - naming the phase at least says what the wait buys.
+        const announce = (phase) => { if (onPhase) onPhase(phase); };
+
+        announce('exact');
         // Bidirectional BFS first: it returns a proven-optimal answer and is
         // usually far faster, especially on the boards where the heuristic is
         // blind. Give it most of the budget; if it can't finish, the weighted
@@ -1155,10 +1174,21 @@ class Solver {
             return { success: false, message: "No solution exists for this board.", path: [], states: [] };
         }
         // Timed out: keep any partial answer as the baseline to beat.
-        if (bidi.status === 'solved') best = { path: bidi.path, states: bidi.states };
+        if (bidi.status === 'solved') recordBest({ path: bidi.path, states: bidi.states });
 
+        // With no clock, the weighted passes would otherwise run to their state
+        // cap, which on Thorough is tens of millions and took minutes. A* is the
+        // weaker engine here - roughly a third of the bidirectional search's
+        // throughput, and on these boards it proves nothing - so giving it more
+        // time than the primary search already spent cannot be right. Allow it
+        // that much and no more; the beam gets the rest.
+        const fallbackEnd = untimed
+            ? performance.now() + (performance.now() - overallStart)
+            : endTime;
+
+        if (fallbackEnd > performance.now()) announce('refine');
         for (let i = 0; i < weights.length; ++i) {
-            const remaining = endTime - performance.now();
+            const remaining = fallbackEnd - performance.now();
             if (remaining <= 0) break;
 
             // Securing a first solution takes priority: until one exists, a pass
@@ -1201,7 +1231,7 @@ class Solver {
                 const lifted = this.reconstruct(result.table, result.slot);
                 if (!lifted) break;   // bookkeeping failed; keep whatever is in hand
                 const { path, states } = lifted;
-                if (!best || path.length < best.path.length) best = { path, states };
+                recordBest({ path, states });
                 if (weight === 1) {
                     return {
                         success: true,
@@ -1233,7 +1263,11 @@ class Solver {
         // and on another spanned 24-27. Drawing again is worth more than
         // widening, so extra budget buys samples rather than beam.
         if (beamWidth > 0) {
-            const beamDeadline = untimed ? Infinity : performance.now() + beamReserveMs;
+            announce('fallback');
+            // Extra time on top of the budget, not a slice of it. Reaching here
+            // means the exact search already spent everything and came back
+            // empty-handed, so the choice is a longer wait or no answer.
+            const beamDeadline = untimed ? Infinity : performance.now() + totalTimeBudgetMs * 0.5;
             // Starts small enough that even the shortest reserve (Fast reserves
             // ~1.2s) completes a full pass; scoring is expensive enough that a
             // wider opening round returned nothing at all on that budget.
@@ -1260,12 +1294,9 @@ class Solver {
                     seed: ++round,
                     onProgress: onProgress ? (n) => onProgress(nodesExplored + n) : null
                 });
-                if (beam.status === 'solved' && (!best || beam.path.length < best.path.length)) {
-                    best = { path: beam.path, states: beam.states };
-                    sinceGain = 0;
-                } else {
-                    sinceGain++;
-                }
+                const before = best;
+                if (beam.status === 'solved') recordBest({ path: beam.path, states: beam.states });
+                if (best !== before) sinceGain = 0; else sinceGain++;
                 // Nothing left to widen into: the whole reachable space was seen.
                 if (beam.status === 'exhausted') break;
 
@@ -1311,10 +1342,8 @@ class Solver {
         const limitHint = lastReason === 'memory'
             ? 'hit the memory limit'
             : `ran out of time after ${elapsed}ms`;
-        // Point at whichever lever is still untried.
-        const advice = beamWidth > 0
-            ? 'try a higher search strength.'
-            : 'try a higher search strength, or turn on Best effort.';
+        // The only lever the user still has.
+        const advice = 'try a higher search strength.';
         return {
             success: false,
             exhausted: false,

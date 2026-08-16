@@ -3,7 +3,7 @@
 // see app.js for the main-thread fallback used on file:// origins.
 // Separate fetch from the page's own script tags, so it needs its own cache
 // buster; keep the version in step with index.html.
-importScripts('solver.js?v=22');
+importScripts('solver.js?v=27');
 
 self.onmessage = (e) => {
     const { bgGrid, fgGrid, options } = e.data;
@@ -11,7 +11,11 @@ self.onmessage = (e) => {
         const solver = new Solver(bgGrid, fgGrid);
         const result = solver.solve({
             ...options,
-            onProgress: (nodes) => self.postMessage({ type: 'progress', nodes })
+            onProgress: (nodes) => self.postMessage({ type: 'progress', nodes }),
+            // Forwarded as it happens so the page can show the answer in hand
+            // and hand it over if the search is cancelled.
+            onBest: (best) => self.postMessage({ type: 'best', best }),
+            onPhase: (phase) => self.postMessage({ type: 'phase', phase })
         });
         // BigInt board states are structured-cloneable, so `result` posts as-is.
         self.postMessage({ type: 'done', result });

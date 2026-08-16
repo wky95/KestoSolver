@@ -13,7 +13,7 @@ const SUITES = [
     ['test-app.js', 'app behaviour + 100k randomised operations', false],
     ['test-async.js', 'daily puzzle loading', false],
     ['test-play-rules.js', 'Play mode moves agree with the solver', false],
-    ['test-beam.js', 'Best effort switch never claims false optimality', false],
+    ['test-beam.js', 'the beam fallback never claims false optimality', false],
     ['test-symmetry.js', 'mirrored positions collapse without corrupting the path', false],
     ['test-optimality.js', 'a search cut short never claims to have proven anything', true],
     ['test-levels.js', 'every real level matches the par Kesto publishes', true],
