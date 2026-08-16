@@ -6,7 +6,7 @@
     <title>Kesto Puzzle Solver</title>
     <!-- ?v= is a cache buster: bump it whenever css/js changes, otherwise
          browsers keep serving the old file even after index.html updates. -->
-    <link rel="stylesheet" href="style.css?v=27">
+    <link rel="stylesheet" href="style.css?v=28">
     <!-- Glory is what kestopuzzle.com itself specifies, so the solver matches
          the game. Preconnect first: the font host is a separate origin, and the
          handshake would otherwise sit in front of every text render. -->
@@ -151,23 +151,25 @@
                     <div class="strength-palette" id="strength-palette">
                         <button class="strength-btn" data-strength="fast">
                             <span class="strength-name">Fast</span>
-                            <span class="strength-desc">~3s · handles most daily puzzles</span>
+                            <span class="strength-desc" id="fast-desc">up to 5s · handles most daily puzzles</span>
                         </button>
                         <button class="strength-btn active" data-strength="balanced">
                             <span class="strength-name">Balanced</span>
-                            <span class="strength-desc">~20s · recommended</span>
+                            <span class="strength-desc" id="balanced-desc">up to 30s · recommended</span>
                         </button>
                         <button class="strength-btn" data-strength="thorough">
                             <span class="strength-name">Thorough</span>
-                            <span class="strength-desc">no time limit · stops at ~1.6GB RAM · desktop only</span>
+                            <span class="strength-desc" id="thorough-desc">runs until it reaches ~1.6GB</span>
                         </button>
                     </div>
                     <p class="strength-note">
-                        Higher strength searches more states, so it is likelier to
-                        find a solution and prove it optimal, but uses more time
-                        and memory. When nothing can be proved within the budget,
-                        the search runs about half as long again looking for an
-                        answer it cannot prove - results say which you got.
+                        A stronger setting searches more states, so it is likelier
+                        to find an answer and prove it is the shortest. The times
+                        above are worst cases: most boards finish in well under a
+                        second, and the rest spend the budget trying to prove an
+                        answer before settling for one it cannot prove. Results
+                        say which you got.
+                        <span id="device-note" class="device-note hidden"></span>
                     </p>
 
                 </div>
@@ -175,8 +177,8 @@
         </main>
     </div>
 
-    <script src="solver.js?v=27"></script>
-    <script src="kesto-api.js?v=27"></script>
-    <script src="app.js?v=27"></script>
+    <script src="solver.js?v=28"></script>
+    <script src="kesto-api.js?v=28"></script>
+    <script src="app.js?v=28"></script>
 </body>
 </html>

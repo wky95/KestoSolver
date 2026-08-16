@@ -510,6 +510,56 @@ run('cancelling keeps the elapsed reading', () => {
         `message: "${app.byId.get('solver-message').textContent}"`);
 });
 
+group('Device limits');
+
+// Thorough peaks near 1.6GB, which a phone will not survive. There is no
+// dependable "is this a phone" signal, so the guard fires only on the two that
+// exist - and must leave everything else alone, including desktop Safari, which
+// reports neither.
+function thoroughOptions(opts) {
+    const app = createApp({ strength: 'thorough', deferTimers: true, worker: true, ...opts });
+    app.setMode('edit'); app.paint(0, 0, 'Y'); app.paint(1, 0, 'T');
+    app.setMode('solve'); app.solve();
+    return { app, options: app.sandbox.__lastWorker.lastOptions };
+}
+
+run('a device that reports nothing gets the full budget', () => {
+    const { app, options } = thoroughOptions({});
+    assert(options.maxStates === 30000000, `maxStates ${options.maxStates}`);
+    assert(!isFinite(options.totalTimeBudgetMs), 'Thorough should stay untimed');
+    assert(app.byId.get('device-note').classList.contains('hidden'),
+        'a device with nothing to report should see no notice');
+});
+
+run('a small-memory device gets a smaller budget and a finite clock', () => {
+    const { app, options } = thoroughOptions({ deviceMemory: 4 });
+    assert(options.maxStates < 30000000 / 4, `maxStates ${options.maxStates} is barely reduced`);
+    assert(options.maxStates > 0, 'budget reduced to nothing');
+    assert(isFinite(options.totalTimeBudgetMs),
+        'an unlimited clock is only safe when memory is what stops the search');
+    const note = app.byId.get('device-note');
+    assert(!note.classList.contains('hidden'), 'the reduction should be stated, not silent');
+    assert(/every setting/.test(note.textContent),
+        `the notice must cover all three strengths, not just Thorough: "${note.textContent}"`);
+});
+
+run('a touch device gets a smaller budget', () => {
+    const { app, options } = thoroughOptions({ coarsePointer: true });
+    assert(!app.byId.get('device-note').classList.contains('hidden'), 'the reduction should be stated');
+    assert(options.maxStates < 30000000 / 3, `maxStates ${options.maxStates}`);
+    assert(isFinite(options.totalTimeBudgetMs), 'should be bounded in time too');
+});
+
+run('a large-memory desktop is untouched', () => {
+    const { options } = thoroughOptions({ deviceMemory: 8 });
+    assert(options.maxStates === 30000000, `maxStates ${options.maxStates}`);
+});
+
+run('the shrunk budget still leaves a usable beam', () => {
+    const { options } = thoroughOptions({ deviceMemory: 4 });
+    assert(options.beamWidth >= 2000, `beamWidth ${options.beamWidth} is too small to find anything`);
+});
+
 group('Boot and persistence');
 
 run('boots into a mode named in the URL', () => {

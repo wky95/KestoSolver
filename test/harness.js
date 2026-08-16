@@ -67,7 +67,8 @@ function camel(s) { return s.replace(/-(\w)/g, (_, c) => c.toUpperCase()); }
 // deferTimers holds setTimeout callbacks in a queue instead of running them
 // inline, so a test can inspect the UI mid-operation (the "Solving..." message)
 // before releasing the work.
-function createApp({ mode = null, strength = 'fast', savedGrids = null, deferTimers = false, worker = false } = {}) {
+function createApp({ mode = null, strength = 'fast', savedGrids = null, deferTimers = false, worker = false,
+                     deviceMemory = undefined, coarsePointer = false } = {}) {
     const byId = new Map();
     const all = [];
 
@@ -129,7 +130,10 @@ function createApp({ mode = null, strength = 'fast', savedGrids = null, deferTim
         window: {
             addEventListener(t, fn) { (winHandlers[t] ||= []).push(fn); },
             location: { href: `http://local/${mode ? '?mode=' + mode : ''}`, search: mode ? '?mode=' + mode : '' },
+            // Only the media query app.js actually asks about.
+            matchMedia: (q) => ({ matches: q === '(pointer: coarse)' ? coarsePointer : false }),
         },
+        navigator: { deviceMemory },
         history: { replaceState() {} },
         localStorage: {
             getItem: k => (k in store ? store[k] : null),
@@ -170,6 +174,7 @@ function createApp({ mode = null, strength = 'fast', savedGrids = null, deferTim
                 globalThis.__lastWorker = self;
                 self.onmessage = null; self.onerror = null; self.terminated = false;
                 self.postMessage = (data) => {
+                    self.lastOptions = data.options;   // what the page actually asked for
                     globalThis.__deliver(() => {
                         if (self.terminated || !self.onmessage) return;
                         try {

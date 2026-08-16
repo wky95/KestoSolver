@@ -898,8 +898,16 @@ class Solver {
         }
         this.ensureTargetDistances();
 
+        // Same reduction the exact search uses. The beam is where hard boards
+        // get their answer, and it was the one engine still exploring every
+        // mirror image separately - on a board with both mirrors that is four
+        // times the work for the same set of distinct positions.
+        const useSym = this.useSymmetry;
+
         const T = new StateTable(maxStates);
-        let frontier = [T.add(this.START_LO, this.START_HI, -1, 255, 0)];
+        let rootLo = this.START_LO, rootHi = this.START_HI;
+        if (useSym) { this.canonLoHi(rootLo, rootHi); rootLo = this._cLo; rootHi = this._cHi; }
+        let frontier = [T.add(rootLo, rootHi, -1, 255, 0)];
 
         // Scores are small integers, so selecting the best `width` is a counting
         // sort rather than an O(n log n) sort of up to 4*width candidates.
@@ -925,8 +933,9 @@ class Solver {
                 const sLo = T.entryLo[slot] >>> 0, sHi = T.entryHi[slot] >>> 0;
                 for (let dir = 0; dir < 4; ++dir) {
                     this.moveLoHi(sLo, sHi, dir);
-                    const lo = this._mvLo, hi = this._mvHi;
+                    let lo = this._mvLo, hi = this._mvHi;
                     if (lo === sLo && hi === sHi) continue;
+                    if (useSym) { this.canonLoHi(lo, hi); lo = this._cLo; hi = this._cHi; }
 
                     // The table dedupes globally, so no position is ever expanded
                     // twice and the search cannot cycle.
@@ -983,20 +992,14 @@ class Solver {
     }
 
     // Walks StateTable parent pointers back to the start.
+    // Replaying the recorded moves would be wrong once the beam collapses
+    // mirrored positions - the stored states are representatives, not boards
+    // the player would actually be looking at. Delegates to the same lift the
+    // exact search uses.
     reconstructFromTable(T, slot) {
-        const path = [];
-        for (let s = slot; T.entryParent[s] !== -1; s = T.entryParent[s]) {
-            path.push(DIR_CHARS[T.entryMove[s]]);
-        }
-        path.reverse();
-
-        const states = [this.start_state];
-        let cur = this.start_state;
-        for (const mv of path) {
-            cur = this.moveBitboard(cur, DIR_CHARS.indexOf(mv));
-            states.push(cur);
-        }
-        return { status: 'solved', path, states };
+        const lifted = this.reconstruct(T, slot);
+        if (!lifted) return { status: 'timeout' };
+        return { status: 'solved', path: lifted.path, states: lifted.states };
     }
 
     // Single A* run. `weight` inflates the heuristic (f = g + weight*h):
@@ -1343,11 +1346,11 @@ class Solver {
             ? 'hit the memory limit'
             : `ran out of time after ${elapsed}ms`;
         // The only lever the user still has.
-        const advice = 'try a higher search strength.';
+        const advice = 'Try a higher search strength.';
         return {
             success: false,
             exhausted: false,
-            message: `Gave up: ${limitHint} (~${nodesExplored} nodes). A solution may still exist - ${advice}`,
+            message: `Gave up: ${limitHint} (~${nodesExplored} nodes). A solution may still exist. ${advice}`,
             path: [],
             states: []
         };

@@ -69,15 +69,87 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentStrength = localStorage.getItem('kestoStrength') || 'balanced';
     if (!STRENGTH_PRESETS[currentStrength]) currentStrength = 'balanced';
 
+    // Thorough's 30M states peak near 1.6GB resident. A desktop tab absorbs
+    // that; a phone reloads the page out from under the search. There is no
+    // reliable "is this a phone" signal, so use the two that exist and only
+    // shrink the budget when one of them actually fires - guessing conservatively
+    // would punish desktop Safari, which reports neither.
+    //
+    // Returns the fraction of the configured state budget this device should be
+    // trusted with, plus a reason to show the user.
+    function deviceBudget() {
+        // Chromium only, and capped at 8 even on larger machines.
+        const gb = typeof navigator !== 'undefined' ? navigator.deviceMemory : undefined;
+        if (typeof gb === 'number' && gb <= 4) {
+            return {
+                scale: 0.15,
+                why: `This device reports ${gb}GB of memory, so every setting searches a smaller share of it.`,
+            };
+        }
+        // A coarse primary pointer means touch-first: phones and tablets, where
+        // tabs are evicted long before a desktop would notice the allocation.
+        const coarse = typeof window !== 'undefined'
+            && typeof window.matchMedia === 'function'
+            && window.matchMedia('(pointer: coarse)').matches;
+        if (coarse) {
+            return {
+                scale: 0.25,
+                why: 'Touch devices drop tabs that allocate too much, so every setting searches a smaller share.',
+            };
+        }
+        return { scale: 1, why: null };
+    }
+    const DEVICE = deviceBudget();
+
+    // Say so rather than silently searching less than the labels promise.
+    if (DEVICE.why) {
+        const note = document.getElementById('device-note');
+        if (note) {
+            note.textContent = DEVICE.why;
+            note.classList.remove('hidden');
+        }
+    }
+
     // The fallback used to sit behind a switch. It was removed because turning
     // it on could only make things worse: it carved 40% off the exact search's
     // budget before that search had failed at anything, which on 20260613 turned
     // a proven-optimal 36 steps into no answer at all. The exact search now
     // keeps its whole budget and the fallback runs on extra time afterwards, so
     // there is nothing left to opt out of.
-    function solverOptions() {
-        return { ...STRENGTH_PRESETS[currentStrength] };
+    function scaledPreset(name) {
+        const preset = STRENGTH_PRESETS[name];
+        if (DEVICE.scale === 1) return { ...preset };
+        return {
+            ...preset,
+            maxStates: Math.max(200000, Math.round(preset.maxStates * DEVICE.scale)),
+            // An unlimited clock is only safe when the state cap is what stops
+            // the search; on a constrained device, bound it both ways.
+            totalTimeBudgetMs: isFinite(preset.totalTimeBudgetMs) ? preset.totalTimeBudgetMs : 60000,
+            beamWidth: Math.max(2000, Math.round(preset.beamWidth * DEVICE.scale)),
+        };
     }
+
+    function solverOptions() {
+        return scaledPreset(currentStrength);
+    }
+
+    // Worst case, not the exact search's share: the fallback adds half the
+    // budget again when nothing can be proved. Derived from the preset the
+    // device will actually get, so the label cannot promise what the search
+    // will not do - on a phone Thorough is neither unlimited nor 1.6GB.
+    function describeStrength(name, blurb) {
+        const p = scaledPreset(name);
+        const ceiling = isFinite(p.totalTimeBudgetMs)
+            ? `up to ${Math.round(p.totalTimeBudgetMs * 1.5 / 1000)}s`
+            : 'runs until it reaches ~1.6GB';
+        return blurb ? `${ceiling} · ${blurb}` : ceiling;
+    }
+
+    [['fast', 'handles most daily puzzles'], ['balanced', 'recommended'], ['thorough', '']]
+        .forEach(([name, blurb]) => {
+            const el = document.getElementById(`${name}-desc`);
+            if (el) el.textContent = describeStrength(name, blurb);
+        });
 
     function syncStrengthButtons() {
         strengthBtns.forEach(b => {
@@ -278,7 +350,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // including GitHub Pages, the worker path is used.
     function createWorker() {
         try {
-            return new Worker('solver.worker.js?v=27');
+            return new Worker('solver.worker.js?v=28');
         } catch (err) {
             console.warn('Web Worker unavailable, solving on the main thread:', err);
             return null;
@@ -427,7 +499,7 @@ document.addEventListener('DOMContentLoaded', () => {
         solvePhase = null;
         const untimed = !isFinite(options.totalTimeBudgetMs);
         const limitNote = untimed
-            ? 'until memory runs out - Cancel to stop'
+            ? 'until memory runs out, Cancel to stop'
             : `up to ${Math.round(options.totalTimeBudgetMs / 1000)}s`;
         solverMessage.style.color = "var(--text-primary)";
         discardSolution();
@@ -516,7 +588,7 @@ document.addEventListener('DOMContentLoaded', () => {
             showResult({
                 success: true,
                 optimal: false,
-                message: `Cancelled - keeping a ${n}-step solution (not proven shortest)`,
+                message: `Cancelled. Keeping a ${n}-step solution (not proven shortest)`,
                 path: bestSoFar.path,
                 states: bestSoFar.states
             });
@@ -588,7 +660,7 @@ document.addEventListener('DOMContentLoaded', () => {
             loadPuzzleIntoBoard(puzzle.bgGrid, puzzle.fgGrid);
 
             let note = `Loaded ${puzzle.id}`;
-            if (par !== null) note += ` - par ${par} moves`;
+            if (par !== null) note += ` · par ${par} moves`;
             note += ` (${puzzle.boxCount} blocks).`;
             // Big boards blow past the search limits; warn before they wait.
             if (puzzle.boxCount > 12) {

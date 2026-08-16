@@ -189,5 +189,43 @@ run('the reduction really does visit fewer states', () => {
     assert(withSym < without, `symmetry did not reduce the search (${withSym} vs ${without})`);
 });
 
+// The beam is the engine that answers boards the exact search cannot finish, so
+// it is also the one whose reconstruction is hardest to eyeball. It stores
+// representatives too now, and replaying its recorded moves would drift onto a
+// mirrored board.
+run('beam answers on a symmetric board still replay to the goal', () => {
+    const P = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'puzzle-20260815.json'), 'utf8'));
+    const s = new Solver(P.bg, P.fg);
+    assert(s.useSymmetry, 'this board should be detected as symmetric');
+
+    const r = s.beamSearch({ width: 3000, maxStates: 3000000, deadline: performance.now() + 60000 });
+    assert(r.status === 'solved', `beam found nothing (${r.status})`);
+    assert(replayReaches(P.bg, P.fg, r.path),
+        `a ${r.path.length}-move beam path does not reach the goal`);
+    assert(r.states.length === r.path.length + 1,
+        `${r.states.length} states for ${r.path.length} moves`);
+});
+
+run('collapsing mirrors makes the beam reach further for the same width', () => {
+    const P = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'puzzle-20260815.json'), 'utf8'));
+    const opts = { width: 3000, maxStates: 3000000, deadline: performance.now() + 60000, seed: 4 };
+
+    const withSym = new Solver(P.bg, P.fg);
+    const t1 = Date.now();
+    const a = withSym.beamSearch(opts);
+    const symMs = Date.now() - t1;
+
+    const without = new Solver(P.bg, P.fg);
+    without.useSymmetry = false;
+    const t2 = Date.now();
+    const b = without.beamSearch({ ...opts, deadline: performance.now() + 60000 });
+    const plainMs = Date.now() - t2;
+
+    assert(a.status === 'solved' && b.status === 'solved', 'both should find something');
+    assert(replayReaches(P.bg, P.fg, a.path), 'symmetric path is invalid');
+    console.log(`          20260815 at width 3000: ${b.path.length} steps in ${(plainMs / 1000).toFixed(1)}s` +
+        `  ->  ${a.path.length} steps in ${(symMs / 1000).toFixed(1)}s with mirrors collapsed`);
+});
+
 console.log(`\n${fail === 0 ? 'ALL PASSED' : 'FAILURES'} — ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
