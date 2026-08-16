@@ -27,8 +27,19 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 // slot index gets that to ~14 bytes of payload, so the same RAM holds roughly
 // an order of magnitude more states.
 class StateTable {
-    constructor(capacityLog2 = 16) {
-        this.allocate(capacityLog2);
+    // `ceiling` is the most states this table will ever be asked to hold. It is
+    // a growth limit, not a reservation: the arrays still start small, so an
+    // easy board allocates almost nothing. It only stops the final doubling
+    // from overshooting into slots that can never be filled.
+    //
+    // Worth 47-64MB on a board that exhausts its budget, depending on where the
+    // final size falls relative to a power of two - modest, but it costs
+    // nothing and it also shortens the copy that each grow pays for. Reserving
+    // the full ceiling up front was measured and rejected: it would allocate
+    // hundreds of megabytes for the many boards that solve in a thousand states.
+    constructor(ceiling = 0) {
+        this.ceiling = ceiling > 0 ? ceiling : 0;
+        this.allocate(16);
         this.size = 0;
     }
 
@@ -51,7 +62,11 @@ class StateTable {
 
     ensureEntryArrays(minimum) {
         if (this.entryLo && this.entryLo.length >= minimum) return;
-        const next = Math.max(1024, minimum, this.entryLo ? this.entryLo.length * 2 : 1024);
+        let next = Math.max(1024, minimum, this.entryLo ? this.entryLo.length * 2 : 1024);
+        // Never reserve room for states that cannot exist. Both the array and
+        // the copy that fills it are paid for, so trimming the last step saves
+        // steady memory and shortens the spike during the grow.
+        if (this.ceiling > 0) next = Math.max(minimum, Math.min(next, this.ceiling));
         const lo = new Uint32Array(next), hi = new Uint32Array(next);
         const parent = new Int32Array(next), move = new Uint8Array(next), depth = new Uint8Array(next);
         if (this.entryLo) {
@@ -111,6 +126,32 @@ class StateTable {
 
 const loOf = (board) => Number(board & 0xFFFFFFFFn) >>> 0;
 const hiOf = (board) => Number(board >> 32n) >>> 0;
+const boardOf = (lo, hi) => (BigInt(hi >>> 0) << 32n) | BigInt(lo >>> 0);
+
+// Bit-reversal within a byte, i.e. one row flipped left-to-right.
+const REVERSE_BYTE = new Uint8Array(256);
+for (let i = 0; i < 256; ++i) {
+    let v = 0;
+    for (let b = 0; b < 8; ++b) if (i & (1 << b)) v |= 1 << (7 - b);
+    REVERSE_BYTE[i] = v;
+}
+const reverseBitsInBytes = (x) => (
+    REVERSE_BYTE[x & 0xFF] |
+    (REVERSE_BYTE[(x >>> 8) & 0xFF] << 8) |
+    (REVERSE_BYTE[(x >>> 16) & 0xFF] << 16) |
+    (REVERSE_BYTE[(x >>> 24) & 0xFF] << 24)
+) >>> 0;
+const swapBytes = (x) => (
+    (x >>> 24) | ((x >>> 8) & 0xFF00) | ((x << 8) & 0xFF0000) | (x << 24)
+) >>> 0;
+
+// Rows are bytes, so flipping left-to-right reverses the bits inside each byte
+// and flipping top-to-bottom reverses the order of the bytes - which, split
+// across the (lo, hi) pair, is a byte swap of each half plus an exchange.
+const mirrorHLo = (lo) => reverseBitsInBytes(lo);
+const mirrorHHi = (hi) => reverseBitsInBytes(hi);
+const mirrorVLo = (lo, hi) => swapBytes(hi);
+const mirrorVHi = (lo, hi) => swapBytes(lo);
 
 // The same 64-bit masks as above, split across the (lo, hi) uint32 pair the
 // search actually runs on. lo holds rows 0-3, hi holds rows 4-7.
@@ -254,6 +295,26 @@ class Solver {
         this._mvLo = 0;
         this._mvHi = 0;
 
+        // A mirror is only a symmetry of the puzzle if it maps the walls and the
+        // targets onto themselves - the blocks may sit anywhere. Where one does,
+        // positions that differ only by that mirror are the same problem, so the
+        // search stores one representative and covers both.
+        //
+        // Only the mirrors are checked. The diagonal reflections would need the
+        // board transposed, which no daily puzzle has been symmetric under, and
+        // 180 degrees is just the two mirrors composed.
+        this.symH = mirrorHLo(this.WALL_LO) === this.WALL_LO
+            && mirrorHHi(this.WALL_HI) === this.WALL_HI
+            && mirrorHLo(this.TARGET_LO) === this.TARGET_LO
+            && mirrorHHi(this.TARGET_HI) === this.TARGET_HI;
+        this.symV = mirrorVLo(this.WALL_LO, this.WALL_HI) === this.WALL_LO
+            && mirrorVHi(this.WALL_LO, this.WALL_HI) === this.WALL_HI
+            && mirrorVLo(this.TARGET_LO, this.TARGET_HI) === this.TARGET_LO
+            && mirrorVHi(this.TARGET_LO, this.TARGET_HI) === this.TARGET_HI;
+        this.useSymmetry = this.symH || this.symV;
+        this._cLo = 0;
+        this._cHi = 0;
+
         this.dist_table = new Array(64).fill(INF);
         this.initHeuristicTable();
         this.initLineTables();
@@ -316,28 +377,28 @@ class Solver {
         }
     }
 
-    // Splits the 64-bit board into two 32-bit halves so bit iteration uses
-    // native int ops + Math.clz32 instead of per-bit BigInt shifting.
-    getHeuristic(state) {
+    // Admissible: every block must reach some target and a move advances a
+    // block by at most one square, so the furthest block's distance is a floor
+    // on the move count. Loose - it ignores that the targets must be distinct -
+    // but a bound that is wrong would turn "proven optimal" into a lie.
+    getHeuristicLoHi(lo, hi) {
         const dt = this.dist_table;
         let h = 0;
 
-        let lo = Number(state & 0xFFFFFFFFn);
-        while (lo !== 0) {
-            const d = dt[31 - Math.clz32(lo & -lo)];
+        let b = lo;
+        while (b !== 0) {
+            const d = dt[31 - Math.clz32(b & -b)];
             if (d === INF) return INF;
             if (d > h) h = d;
-            lo &= lo - 1;
+            b &= b - 1;
         }
-
-        let hi = Number(state >> 32n);
-        while (hi !== 0) {
-            const d = dt[32 + (31 - Math.clz32(hi & -hi))];
+        b = hi;
+        while (b !== 0) {
+            const d = dt[32 + (31 - Math.clz32(b & -b))];
             if (d === INF) return INF;
             if (d > h) h = d;
-            hi &= hi - 1;
+            b &= b - 1;
         }
-
         return h;
     }
 
@@ -394,6 +455,73 @@ class Solver {
 
         this._mvLo = (((lo ^ ml) | fl) >>> 0);
         this._mvHi = (((hi ^ mh) | fh) >>> 0);
+    }
+
+    // The smallest of a position's mirror images, written to this._cLo/_cHi.
+    // Two positions that differ only by a symmetry canonicalise to the same
+    // pair, so the search visits the family once instead of once per member.
+    //
+    // Callers guard on this.useSymmetry rather than relying on an early return
+    // here: the guard hoists out of the expansion loop, so boards with no
+    // symmetry never reach this at all.
+    canonLoHi(lo, hi) {
+        let bestLo = lo, bestHi = hi;
+
+        if (this.symH) {
+            const l = mirrorHLo(lo), h = mirrorHHi(hi);
+            if (h < bestHi || (h === bestHi && l < bestLo)) { bestLo = l; bestHi = h; }
+        }
+        if (this.symV) {
+            const l = mirrorVLo(lo, hi), h = mirrorVHi(lo, hi);
+            if (h < bestHi || (h === bestHi && l < bestLo)) { bestLo = l; bestHi = h; }
+        }
+        if (this.symH && this.symV) {
+            // The two composed, i.e. a half turn.
+            const hl = mirrorHLo(lo), hh = mirrorHHi(hi);
+            const l = mirrorVLo(hl, hh), h = mirrorVHi(hl, hh);
+            if (h < bestHi || (h === bestHi && l < bestLo)) { bestLo = l; bestHi = h; }
+        }
+
+        this._cLo = bestLo;
+        this._cHi = bestHi;
+    }
+
+    // Turns a chain of stored states into real moves.
+    //
+    // Under symmetry the stored states are representatives, so replaying the
+    // recorded moves from the real start would drift onto a mirrored board.
+    // Instead, walk the chain: from the actual position, whichever move lands
+    // on something that canonicalises to the next link is a legal choice, and
+    // one is guaranteed to exist because a move commutes with a mirror. Without
+    // symmetry this degenerates to replaying the chain, so both engines share it.
+    //
+    // `chain` is a flat [lo, hi, ...] list starting at the canonical form of the
+    // start. Returns null if no move matches, which would mean the bookkeeping
+    // is wrong - better to report no solution than to hand back a broken path.
+    liftChain(chain) {
+        const useSym = this.useSymmetry;
+        const path = [];
+        const states = [this.start_state];
+        let curLo = this.START_LO, curHi = this.START_HI;
+
+        for (let i = 2; i < chain.length; i += 2) {
+            const wantLo = chain[i], wantHi = chain[i + 1];
+            let took = -1;
+            for (let dir = 0; dir < 4; ++dir) {
+                this.moveLoHi(curLo, curHi, dir);
+                const nLo = this._mvLo, nHi = this._mvHi;
+                let kLo = nLo, kHi = nHi;
+                if (useSym) { this.canonLoHi(nLo, nHi); kLo = this._cLo; kHi = this._cHi; }
+                if (kLo === wantLo && kHi === wantHi) {
+                    took = dir; curLo = nLo; curHi = nHi;
+                    break;
+                }
+            }
+            if (took === -1) return null;
+            path.push(DIR_CHARS[took]);
+            states.push(boardOf(curLo, curHi));
+        }
+        return { path, states };
     }
 
     moveBitboard(state, dir) {
@@ -512,9 +640,17 @@ class Solver {
         const goal = this.TARGET;
         if (start === goal) return { status: 'solved', optimal: true, path: [], states: [start] };
 
-        const F = new StateTable();
-        const B = new StateTable();
-        F.add(loOf(start), hiOf(start), -1, 255, 0);
+        // Hoisted so the expansion loops below branch on a constant.
+        const useSym = this.useSymmetry;
+
+        // Either table could in principle hold the whole budget, so both take
+        // the full figure as their ceiling.
+        const F = new StateTable(maxStates);
+        const B = new StateTable(maxStates);
+        // The goal is fixed by every symmetry in the group, so it is already
+        // canonical; the start generally is not.
+        if (useSym) this.canonLoHi(loOf(start), hiOf(start));
+        F.add(useSym ? this._cLo : loOf(start), useSym ? this._cHi : hiOf(start), -1, 255, 0);
         B.add(loOf(goal), hiOf(goal), -1, 255, 0);
         let fFrontier = [0], bFrontier = [0];   // slot indices, not boards
         let dF = 0, dB = 0;
@@ -549,8 +685,9 @@ class Solver {
                     const sLo = F.entryLo[slot] >>> 0, sHi = F.entryHi[slot] >>> 0;
                     for (let dir = 0; dir < 4; ++dir) {
                         this.moveLoHi(sLo, sHi, dir);
-                        const lo = this._mvLo, hi = this._mvHi;
+                        let lo = this._mvLo, hi = this._mvHi;
                         if (lo === sLo && hi === sHi) continue;
+                        if (useSym) { this.canonLoHi(lo, hi); lo = this._cLo; hi = this._cHi; }
                         const added = F.add(lo, hi, slot, dir, dF + 1);
                         if (added === -1) continue;
                         next.push(added);
@@ -576,7 +713,11 @@ class Solver {
                         const preds = this.predecessorsLoHi(sLo, sHi, dir);
                         if (preds === null) continue;
                         for (let i = 0; i < preds.length; i += 2) {
-                            const lo = preds[i] >>> 0, hi = preds[i + 1] >>> 0;
+                            let lo = preds[i] >>> 0, hi = preds[i + 1] >>> 0;
+                            // Canonicalising the predecessors of one representative
+                            // yields every quotient predecessor: a predecessor of a
+                            // mirrored position is the mirror of a predecessor.
+                            if (useSym) { this.canonLoHi(lo, hi); lo = this._cLo; hi = this._cHi; }
                             const added = B.add(lo, hi, slot, dir, dB + 1);
                             if (added === -1) continue;
                             next.push(added);
@@ -598,42 +739,46 @@ class Solver {
             return { status: proven ? 'unsolvable' : 'timeout' };
         }
 
-        const forwardMoves = [];
-        for (let s = meetF; F.entryParent[s] !== -1; s = F.entryParent[s]) {
-            forwardMoves.push(DIR_CHARS[F.entryMove[s]]);
+        // Both halves are chains of stored states, which under symmetry are
+        // representatives rather than real positions. Collect the chain, then
+        // walk it from the real start: at each link, whichever move lands on
+        // something that canonicalises to the next link is a legal move, and
+        // one always exists. That recovers a real path without tracking which
+        // mirror each representative stood for.
+        const chain = [];   // [lo, hi] pairs, canon(start) through to the goal
+        for (let s = meetF; s !== -1; s = F.entryParent[s]) {
+            chain.push(F.entryLo[s] >>> 0, F.entryHi[s] >>> 0);
         }
-        forwardMoves.reverse();
-        // In the backward table, `parent` points one step CLOSER to the goal,
-        // so walking it forward from the meeting point spells out the tail.
-        const backwardMoves = [];
-        for (let s = meetB; B.entryParent[s] !== -1; s = B.entryParent[s]) {
-            backwardMoves.push(DIR_CHARS[B.entryMove[s]]);
+        for (let i = 0, j = chain.length - 2; i < j; i += 2, j -= 2) {
+            const l = chain[i], h = chain[i + 1];
+            chain[i] = chain[j]; chain[i + 1] = chain[j + 1];
+            chain[j] = l; chain[j + 1] = h;
+        }
+        // In the backward table, `parent` points one step CLOSER to the goal, so
+        // walking it from the meeting point spells out the tail. The meeting
+        // state itself is already the last entry above.
+        for (let s = B.entryParent[meetB]; s !== -1; s = B.entryParent[s]) {
+            chain.push(B.entryLo[s] >>> 0, B.entryHi[s] >>> 0);
         }
 
-        const path = forwardMoves.concat(backwardMoves);
-        const states = [start];
-        let cur = start;
-        for (const mv of path) {
-            cur = this.moveBitboard(cur, DIR_CHARS.indexOf(mv));
-            states.push(cur);
-        }
-        return { status: 'solved', optimal: proven, path, states };
+        const lifted = this.liftChain(chain);
+        if (!lifted) return { status: 'timeout' };
+        return { status: 'solved', optimal: proven, path: lifted.path, states: lifted.states };
     }
 
-    // Reconstructs path/states by walking parent pointers instead of
-    // copying arrays on every expansion (which made long solutions O(n^2)).
-    reconstruct(goalNode) {
-        const path = [];
-        const states = [];
-        let n = goalNode;
-        while (n) {
-            states.push(n.state);
-            if (n.move !== null) path.push(n.move);
-            n = n.parent;
+    // Walks a StateTable parent chain back to the start and lifts it into real
+    // moves, the same way the bidirectional search does.
+    reconstruct(table, slot) {
+        const chain = [];
+        for (let s = slot; s !== -1; s = table.entryParent[s]) {
+            chain.push(table.entryLo[s] >>> 0, table.entryHi[s] >>> 0);
         }
-        path.reverse();
-        states.reverse();
-        return { path, states };
+        for (let i = 0, j = chain.length - 2; i < j; i += 2, j -= 2) {
+            const l = chain[i], h = chain[i + 1];
+            chain[i] = chain[j]; chain[i + 1] = chain[j + 1];
+            chain[j] = l; chain[j + 1] = h;
+        }
+        return this.liftChain(chain);
     }
 
     // One BFS per target, so scoring can reason about which block goes to which
@@ -753,7 +898,7 @@ class Solver {
         }
         this.ensureTargetDistances();
 
-        const T = new StateTable();
+        const T = new StateTable(maxStates);
         let frontier = [T.add(this.START_LO, this.START_HI, -1, 255, 0)];
 
         // Scores are small integers, so selecting the best `width` is a counting
@@ -859,15 +1004,32 @@ class Solver {
     // solution optimality for speed (bounded-suboptimal "Weighted A*"),
     // used as a fallback when the exact search is too slow.
     runAStar({ weight, nodeLimit, deadline, upperBound = Infinity, maxStates = 2000000, onProgress = null }) {
-        const open_list = new PriorityQueue();
-        const best_g = new Map();
-        const dirChars = ['U', 'D', 'L', 'R'];
+        const useSym = this.useSymmetry;
+        const T = new StateTable(maxStates);
 
-        const start_h = this.getHeuristic(this.start_state);
+        // Cost-so-far per slot. Kept apart from the table because A* revises it
+        // when a cheaper route to a known state turns up, which the shared
+        // table has no notion of.
+        let gScore = new Int32Array(1024);
+        const ensureG = (slot) => {
+            if (slot < gScore.length) return;
+            const bigger = new Int32Array(Math.max(slot + 1, gScore.length * 2));
+            bigger.set(gScore);
+            gScore = bigger;
+        };
+
+        let sLo = this.START_LO, sHi = this.START_HI;
+        if (useSym) { this.canonLoHi(sLo, sHi); sLo = this._cLo; sHi = this._cHi; }
+
+        const start_h = this.getHeuristicLoHi(sLo, sHi);
         if (start_h === INF) return { status: 'unsolvable', nodesExplored: 0 };
 
-        open_list.push({ state: this.start_state, g: 0, h: start_h, f: start_h * weight, parent: null, move: null });
-        best_g.set(this.start_state, 0);
+        const startSlot = T.add(sLo, sHi, -1, 255, 0);
+        ensureG(startSlot);
+        gScore[startSlot] = 0;
+
+        const open_list = new PriorityQueue();
+        open_list.push({ slot: startSlot, g: 0, f: start_h * weight });
 
         let nodes_explored = 0;
 
@@ -875,7 +1037,7 @@ class Solver {
             const curr = open_list.pop();
 
             // Skip stale queue entries superseded by a cheaper path to the same state.
-            if (curr.g > best_g.get(curr.state)) continue;
+            if (curr.g > gScore[curr.slot]) continue;
 
             nodes_explored++;
 
@@ -883,7 +1045,7 @@ class Solver {
             if ((nodes_explored & 511) === 0) {
                 // 262144 is a multiple of 512, so this rides the same check.
                 if (onProgress && (nodes_explored & 262143) === 0) onProgress(nodes_explored);
-                if (best_g.size > maxStates) {
+                if (T.size > maxStates) {
                     return { status: 'timeout', reason: 'memory', nodesExplored: nodes_explored };
                 }
                 if (performance.now() > deadline) {
@@ -894,32 +1056,38 @@ class Solver {
                 return { status: 'timeout', reason: 'nodes', nodesExplored: nodes_explored };
             }
 
-            if (curr.state === this.TARGET) {
-                return { status: 'solved', node: curr, nodesExplored: nodes_explored };
+            const curLo = T.entryLo[curr.slot] >>> 0, curHi = T.entryHi[curr.slot] >>> 0;
+            if (curLo === this.TARGET_LO && curHi === this.TARGET_HI) {
+                return { status: 'solved', table: T, slot: curr.slot, nodesExplored: nodes_explored };
             }
 
-            for (let i = 0; i < 4; ++i) {
-                const next_state = this.moveBitboard(curr.state, i);
-                if (next_state === curr.state) continue;
+            for (let dir = 0; dir < 4; ++dir) {
+                this.moveLoHi(curLo, curHi, dir);
+                let lo = this._mvLo, hi = this._mvHi;
+                if (lo === curLo && hi === curHi) continue;
+                if (useSym) { this.canonLoHi(lo, hi); lo = this._cLo; hi = this._cHi; }
 
                 const next_g = curr.g + 1;
-                const prevBest = best_g.get(next_state);
-                if (prevBest !== undefined && prevBest <= next_g) continue;
+                const existing = T.find(lo, hi);
+                if (existing !== -1 && gScore[existing] <= next_g) continue;
 
-                const h = this.getHeuristic(next_state);
+                const h = this.getHeuristicLoHi(lo, hi);
                 if (h === INF) continue;
                 // h is admissible, so this node can never beat a known solution.
                 if (next_g + h >= upperBound) continue;
 
-                best_g.set(next_state, next_g);
-                open_list.push({
-                    state: next_state,
-                    g: next_g,
-                    h: h,
-                    f: next_g + weight * h,
-                    parent: curr,
-                    move: dirChars[i]
-                });
+                let slot = existing;
+                if (slot === -1) {
+                    slot = T.add(lo, hi, curr.slot, dir, next_g & 255);
+                } else {
+                    // Cheaper route found: repoint the parent so reconstruction
+                    // follows it.
+                    T.entryParent[slot] = curr.slot;
+                    T.entryMove[slot] = dir;
+                }
+                ensureG(slot);
+                gScore[slot] = next_g;
+                open_list.push({ slot, g: next_g, f: next_g + weight * h });
             }
         }
 
@@ -959,11 +1127,11 @@ class Solver {
         let best = null;
         let lastReason = 'time';
 
-        // The A* fallback still keeps a Map of BigInt-keyed nodes (~200 bytes a
-        // state) whereas the bidirectional search packs states into typed
-        // arrays (~15 bytes). They cannot share one state budget, or raising it
-        // for the packed search would let the fallback exhaust memory.
-        const fallbackMaxStates = Math.min(maxStates, 2000000);
+        // Both engines now pack states into the same typed arrays, so the
+        // fallback can use the whole budget. It used to be pinned to 2M because
+        // it kept BigInt-keyed nodes in a Map at ~200 bytes each; the open list
+        // still costs more per state than plain BFS, so leave it some headroom.
+        const fallbackMaxStates = Math.floor(maxStates * 0.75);
 
         // Bidirectional BFS first: it returns a proven-optimal answer and is
         // usually far faster, especially on the boards where the heuristic is
@@ -1030,7 +1198,9 @@ class Solver {
             }
 
             if (result.status === 'solved') {
-                const { path, states } = this.reconstruct(result.node);
+                const lifted = this.reconstruct(result.table, result.slot);
+                if (!lifted) break;   // bookkeeping failed; keep whatever is in hand
+                const { path, states } = lifted;
                 if (!best || path.length < best.path.length) best = { path, states };
                 if (weight === 1) {
                     return {

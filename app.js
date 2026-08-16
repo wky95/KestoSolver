@@ -285,7 +285,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // including GitHub Pages, the worker path is used.
     function createWorker() {
         try {
-            return new Worker('solver.worker.js?v=20');
+            return new Worker('solver.worker.js?v=22');
         } catch (err) {
             console.warn('Web Worker unavailable, solving on the main thread:', err);
             return null;

@@ -1,0 +1,36 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # The slow suites solve every real level and take several minutes, so they
+  # run nightly rather than on every push.
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  fast:
+    name: fast suites
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      # No dependencies and no build step: the site is static and the tests are
+      # plain Node against a DOM shim.
+      - run: node test/run.js
+
+  full:
+    name: full suites incl. real levels
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: KESTO_SLOW=1 node test/run.js
