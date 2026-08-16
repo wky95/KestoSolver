@@ -5,6 +5,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnSolve = document.getElementById('btn-solve');
     const btnCancel = document.getElementById('btn-cancel');
     const solverMessage = document.getElementById('solver-message');
+    const solverStats = document.getElementById('solver-stats');
 
     // Modes
     const MODES = ['edit', 'play', 'solve'];
@@ -46,16 +47,44 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Search strength presets: higher budgets explore more of the state space,
     // so they are likelier to find a solution and prove it optimal.
-    // The bidirectional search packs states into typed arrays at roughly
-    // 15-30 bytes each, so these caps are far higher than the old Map-based
-    // ones; thorough peaks near 1GB.
+    // The bidirectional search packs states into typed arrays, so these caps are
+    // far higher than the old Map-based ones. Measured on a board that exhausts
+    // the cap, thorough's 30M states peak at ~1.6GB resident: ~1.25GB of hash
+    // tables and entry arrays plus ~0.3GB of frontier arrays and growth spikes.
+    // Raising it buys almost nothing - the frontier multiplies by ~2.9 per
+    // search level, so one more level of depth would cost ~4.8GB.
+    // beamWidth is the widest best-effort pass allowed, not the one always used:
+    // the solver opens narrow, widens up to this cap, then re-samples at the cap
+    // until the answer stops improving. Only read when Best effort is on.
     const STRENGTH_PRESETS = {
-        fast:     { totalTimeBudgetMs: 3000,  maxStates: 3000000 },
-        balanced: { totalTimeBudgetMs: 20000, maxStates: 12000000 },
-        thorough: { totalTimeBudgetMs: 90000, maxStates: 30000000 }
+        fast:     { totalTimeBudgetMs: 3000,  maxStates: 3000000,  beamWidth: 20000 },
+        balanced: { totalTimeBudgetMs: 20000, maxStates: 12000000, beamWidth: 100000 },
+        // Thorough is bounded by memory alone: it searches until the state cap
+        // is reached rather than stopping on a clock. Cancel remains available
+        // throughout because the search runs in a worker.
+        thorough: { totalTimeBudgetMs: Infinity, maxStates: 30000000, beamWidth: 100000 }
     };
     let currentStrength = localStorage.getItem('kestoStrength') || 'balanced';
     if (!STRENGTH_PRESETS[currentStrength]) currentStrength = 'balanced';
+
+    const beamToggle = document.getElementById('beam-toggle');
+    let bestEffort = localStorage.getItem('kestoBestEffort') === '1';
+    beamToggle.checked = bestEffort;
+    beamToggle.addEventListener('change', () => {
+        bestEffort = beamToggle.checked;
+        localStorage.setItem('kestoBestEffort', bestEffort ? '1' : '0');
+    });
+
+    // Best effort trades the optimality proof for an answer, so it is opt-in
+    // per search rather than baked into the preset.
+    function solverOptions() {
+        const preset = STRENGTH_PRESETS[currentStrength];
+        return {
+            totalTimeBudgetMs: preset.totalTimeBudgetMs,
+            maxStates: preset.maxStates,
+            beamWidth: bestEffort ? preset.beamWidth : 0
+        };
+    }
 
     function syncStrengthButtons() {
         strengthBtns.forEach(b => {
@@ -256,11 +285,59 @@ document.addEventListener('DOMContentLoaded', () => {
     // including GitHub Pages, the worker path is used.
     function createWorker() {
         try {
-            return new Worker('solver.worker.js?v=13');
+            return new Worker('solver.worker.js?v=20');
         } catch (err) {
             console.warn('Web Worker unavailable, solving on the main thread:', err);
             return null;
         }
+    }
+
+    // --- Search timing ---
+    //
+    // Reported separately from the status line rather than folded into it: the
+    // status sentence is what the search concluded, this is how much it cost.
+    // Driven by its own ticker rather than by worker progress events, which on
+    // Thorough can be many seconds apart - a clock that freezes mid-search reads
+    // as a hang.
+    let solveStartedAt = 0;
+    let solveTicker = null;
+    let statesSeen = null;
+
+    function elapsedText() {
+        const secs = (performance.now() - solveStartedAt) / 1000;
+        // Sub-minute searches are the common case; past that the tenths are noise.
+        return secs < 60
+            ? `${secs.toFixed(1)}s`
+            : `${Math.floor(secs / 60)}m ${String(Math.round(secs % 60)).padStart(2, '0')}s`;
+    }
+
+    function renderSolveStats() {
+        const states = statesSeen === null
+            ? ''
+            : ` · ${statesSeen >= 1e6 ? (statesSeen / 1e6).toFixed(1) + 'M' : Math.round(statesSeen / 1000) + 'k'} states`;
+        solverStats.textContent = elapsedText() + states;
+    }
+
+    function startSolveTimer() {
+        solveStartedAt = performance.now();
+        statesSeen = null;
+        renderSolveStats();
+        clearInterval(solveTicker);
+        solveTicker = setInterval(renderSolveStats, 100);
+    }
+
+    // Leaves the final figure on screen; only the ticking stops.
+    function stopSolveTimer() {
+        if (solveTicker !== null) {
+            clearInterval(solveTicker);
+            solveTicker = null;
+            renderSolveStats();
+        }
+    }
+
+    function clearSolveStats() {
+        stopSolveTimer();
+        solverStats.textContent = '';
     }
 
     function setSolvingUI(isSolving) {
@@ -303,25 +380,30 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     btnSolve.addEventListener('click', () => {
-        const options = STRENGTH_PRESETS[currentStrength];
-        const budgetSec = Math.round(options.totalTimeBudgetMs / 1000);
+        const options = solverOptions();
+        const untimed = !isFinite(options.totalTimeBudgetMs);
+        const limitNote = untimed
+            ? 'until memory runs out - Cancel to stop'
+            : `up to ${Math.round(options.totalTimeBudgetMs / 1000)}s`;
         solverMessage.style.color = "var(--text-primary)";
         discardSolution();
+        startSolveTimer();
 
         activeWorker = createWorker();
         setSolvingUI(true);
 
         if (activeWorker) {
-            solverMessage.textContent = `Solving... up to ${budgetSec}s.`;
+            solverMessage.textContent = `Solving... ${limitNote}.`;
             activeWorker.onmessage = (e) => {
                 const msg = e.data;
                 if (msg.type === 'progress') {
-                    const millions = (msg.nodes / 1e6).toFixed(1);
-                    solverMessage.textContent = `Solving... ${millions}M states, up to ${budgetSec}s.`;
+                    statesSeen = msg.nodes;
+                    renderSolveStats();
                     return;
                 }
                 activeWorker.terminate();
                 activeWorker = null;
+                stopSolveTimer();
                 setSolvingUI(false);
                 if (msg.type === 'done') showResult(msg.result);
                 else showFailure('Solver error: ' + msg.message);
@@ -330,6 +412,7 @@ document.addEventListener('DOMContentLoaded', () => {
             activeWorker.onerror = (err) => {
                 console.error(err);
                 if (activeWorker) { activeWorker.terminate(); activeWorker = null; }
+                stopSolveTimer();
                 setSolvingUI(false);
                 showFailure('The solver ran out of memory. Try a lower search strength.');
             };
@@ -337,17 +420,27 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        // Fallback: blocks the page, so warn and let the browser paint first.
-        solverMessage.textContent = `Solving... up to ${budgetSec}s, the page may freeze.`;
+        // Fallback: this blocks the page, so Cancel cannot be clicked and an
+        // unlimited search would wedge the tab with no way out. Force a finite
+        // cap here regardless of the preset.
+        const fallbackOptions = untimed
+            ? { ...options, totalTimeBudgetMs: 90000 }
+            : options;
+        const fallbackSec = Math.round(fallbackOptions.totalTimeBudgetMs / 1000);
+        solverMessage.textContent = `Solving... up to ${fallbackSec}s, the page may freeze.`;
         setTimeout(() => {
             // Reset buttons before rendering, since showResult/showFailure decide
             // the final Solve/Edit visibility themselves.
             setSolvingUI(false);
             try {
-                showResult(new Solver(bgGrid, fgGrid).solve(options));
+                showResult(new Solver(bgGrid, fgGrid).solve(fallbackOptions));
             } catch (err) {
                 console.error(err);
                 showFailure('An error occurred during solving.');
+            } finally {
+                // The page was blocked throughout, so the ticker never fired;
+                // this is the only reading it gets.
+                stopSolveTimer();
             }
         }, 50);
     });
@@ -356,6 +449,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!activeWorker) return;
         activeWorker.terminate(); // hard-stops the synchronous search inside the worker
         activeWorker = null;
+        stopSolveTimer();          // keeps the elapsed figure at the moment of cancelling
         setSolvingUI(false);
         solverMessage.textContent = "Search cancelled.";
         solverMessage.style.color = "var(--text-secondary)";
@@ -427,7 +521,9 @@ document.addEventListener('DOMContentLoaded', () => {
             note += ` (${puzzle.boxCount} blocks).`;
             // Big boards blow past the search limits; warn before they wait.
             if (puzzle.boxCount > 12) {
-                note += ' This one is large - the solver may not crack it even on Thorough.';
+                note += bestEffort
+                    ? ' This one is large - expect a Best effort answer rather than a proven optimal one.'
+                    : ' This one is large - the exact search will probably give up. Turn on Best effort to get a solution anyway.';
             }
             setPuzzleMessage(note, "#00ff88");
             puzzleBadge.textContent = `#${puzzle.id}`;
@@ -571,6 +667,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // puzzle, or the start of another search.
     function discardSolution() {
         hidePlayback();
+        // The timing belonged to the answer that is going away.
+        clearSolveStats();
         playbackStates = [];
         playbackPath = [];
         playbackIdentities = [];
@@ -781,7 +879,7 @@ document.addEventListener('DOMContentLoaded', () => {
         renderPlay();
 
         if (isSolved(playBlocks)) {
-            setPlayMessage(`Solved in ${playHistory.length} moves.`, "#00ff88");
+            setPlayMessage(`Solved in ${playHistory.length} move${playHistory.length === 1 ? '' : 's'}.`, "#00ff88");
         } else {
             setPlayMessage("Every block moves at once. Use the arrow keys.");
         }

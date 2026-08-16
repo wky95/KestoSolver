@@ -13,6 +13,12 @@ const INF = 10000;
 
 const DIR_CHARS = ['U', 'D', 'L', 'R'];
 
+// Caps the best-effort sampling loop so an unlimited time budget still ends.
+const MAX_BEAM_ROUNDS = 14;
+
+// "Optimal solution in 1 steps" is reachable on a one-move board.
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
 // Open-addressed hash table for visited states, packed into typed arrays.
 //
 // A Map<BigInt, {parent, move, d}> costs ~200 bytes per state once the BigInt
@@ -32,6 +38,11 @@ class StateTable {
         this.mask = this.capacity - 1;
         // (0,0) is never a real board: block count is invariant and non-zero,
         // so an all-zero key doubles as the empty-slot marker.
+        //
+        // Measured alternatives that did not earn their cost: interleaving these
+        // three into one stride-4 array was within noise while using 33% more
+        // memory per bucket, and dropping the load factor to 50% gained 3.5% for
+        // double the table. The probe path is not the bottleneck.
         this.keyLo = new Uint32Array(this.capacity);
         this.keyHi = new Uint32Array(this.capacity);
         this.slotOf = new Int32Array(this.capacity).fill(-1);
@@ -96,13 +107,17 @@ class StateTable {
         return slot;
     }
 
-    boardAt(slot) {
-        return (BigInt(this.entryHi[slot]) << 32n) | BigInt(this.entryLo[slot]);
-    }
 }
 
 const loOf = (board) => Number(board & 0xFFFFFFFFn) >>> 0;
 const hiOf = (board) => Number(board >> 32n) >>> 0;
+
+// The same 64-bit masks as above, split across the (lo, hi) uint32 pair the
+// search actually runs on. lo holds rows 0-3, hi holds rows 4-7.
+const U32_ROW0_LO = 0x000000FF, U32_ROW0_HI = 0x00000000;
+const U32_ROW7_LO = 0x00000000, U32_ROW7_HI = 0xFF000000 | 0;
+const U32_COL0 = 0x01010101, U32_COL7 = 0x80808080 | 0;
+const U32_NOT_COL7 = 0x7F7F7F7F, U32_NOT_COL0 = 0xFEFEFEFE | 0;
 // A move only ever shifts blocks along one axis, so it decomposes into eight
 // independent 1-D lines: rows for L/R, columns for U/D.
 const IS_ROW_LINE = [false, false, true, true];
@@ -128,18 +143,29 @@ function lineStep(blocks, walls, step) {
     return result;
 }
 
+// extractLine on a (lo, hi) pair. Rows are already contiguous bytes; columns
+// have to be gathered a bit at a time.
+function extractLineU32(lo, hi, dir, idx) {
+    if (IS_ROW_LINE[dir]) {
+        return idx < 4 ? (lo >>> (idx * 8)) & 0xFF : (hi >>> ((idx - 4) * 8)) & 0xFF;
+    }
+    return (
+        ((lo >>> idx) & 1) |
+        (((lo >>> (idx + 8)) & 1) << 1) |
+        (((lo >>> (idx + 16)) & 1) << 2) |
+        (((lo >>> (idx + 24)) & 1) << 3) |
+        (((hi >>> idx) & 1) << 4) |
+        (((hi >>> (idx + 8)) & 1) << 5) |
+        (((hi >>> (idx + 16)) & 1) << 6) |
+        (((hi >>> (idx + 24)) & 1) << 7)
+    );
+}
+
 function extractLine(board, dir, idx) {
     if (IS_ROW_LINE[dir]) return Number((board >> BigInt(idx * 8)) & 0xFFn);
     let m = 0;
     for (let r = 0; r < 8; r++) if ((board >> BigInt(r * 8 + idx)) & 1n) m |= 1 << r;
     return m;
-}
-
-function insertLine(board, dir, idx, mask) {
-    if (IS_ROW_LINE[dir]) return board | (BigInt(mask) << BigInt(idx * 8));
-    let b = board;
-    for (let r = 0; r < 8; r++) if (mask & (1 << r)) b |= 1n << BigInt(r * 8 + idx);
-    return b;
 }
 
 function shiftU(x) { return x >> 8n; }
@@ -216,6 +242,18 @@ class Solver {
         this.WALLS = this.encodeBg('#');
         this.TARGET = this.encodeBg('T');
         this.start_state = this.encodeFg('Y');
+
+        // uint32 mirrors of the three boards. The search runs on these; the
+        // BigInt originals stay for the table setup and the returned states.
+        this.WALL_LO = loOf(this.WALLS);
+        this.WALL_HI = hiOf(this.WALLS);
+        this.TARGET_LO = loOf(this.TARGET);
+        this.TARGET_HI = hiOf(this.TARGET);
+        this.START_LO = loOf(this.start_state);
+        this.START_HI = hiOf(this.start_state);
+        this._mvLo = 0;
+        this._mvHi = 0;
+
         this.dist_table = new Array(64).fill(INF);
         this.initHeuristicTable();
         this.initLineTables();
@@ -308,6 +346,56 @@ class Solver {
     shiftL(x) { return (x >> 1n) & NOT_COL7_MASK; }
     shiftR(x) { return (x << 1n) & NOT_COL0_MASK; }
 
+    // moveBitboard's rule on a (lo, hi) uint32 pair, which is what the search
+    // stores. BigInt allocates and boxes on every shift; with eight shift rounds
+    // per node and millions of nodes per search that dominated the runtime.
+    //
+    // The result lands in this._mvLo / this._mvHi rather than being returned:
+    // returning a pair or an array would allocate once per expansion.
+    moveLoHi(lo, hi, dir) {
+        let ml = lo, mh = hi;
+
+        for (let i = 0; i < 8; ++i) {
+            // Blocks already against the far edge can never advance.
+            let el, eh;
+            if (dir === 0)      { el = ml & U32_ROW0_LO; eh = mh & U32_ROW0_HI; }
+            else if (dir === 1) { el = ml & U32_ROW7_LO; eh = mh & U32_ROW7_HI; }
+            else if (dir === 2) { el = ml & U32_COL0;    eh = mh & U32_COL0; }
+            else                { el = ml & U32_COL7;    eh = mh & U32_COL7; }
+
+            let dl, dh;
+            if (dir === 0)      { dl = ((ml >>> 8) | (mh << 24)) >>> 0; dh = mh >>> 8; }
+            else if (dir === 1) { dl = (ml << 8) >>> 0; dh = ((mh << 8) | (ml >>> 24)) >>> 0; }
+            else if (dir === 2) { dl = (((ml >>> 1) | (mh << 31)) & U32_NOT_COL7) >>> 0; dh = ((mh >>> 1) & U32_NOT_COL7) >>> 0; }
+            else                { dl = ((ml << 1) & U32_NOT_COL0) >>> 0; dh = (((mh << 1) | (ml >>> 31)) & U32_NOT_COL0) >>> 0; }
+
+            const stl = (lo ^ ml) >>> 0, sth = (hi ^ mh) >>> 0;
+            const bdl = (dl & ((this.WALL_LO | stl) >>> 0)) >>> 0;
+            const bdh = (dh & ((this.WALL_HI | sth) >>> 0)) >>> 0;
+
+            // Push the blocked destinations back one square to find which
+            // sources they belong to.
+            let rl, rh;
+            if (dir === 0)      { rl = (bdl << 8) >>> 0; rh = ((bdh << 8) | (bdl >>> 24)) >>> 0; }
+            else if (dir === 1) { rl = ((bdl >>> 8) | (bdh << 24)) >>> 0; rh = bdh >>> 8; }
+            else if (dir === 2) { rl = ((bdl << 1) & U32_NOT_COL0) >>> 0; rh = (((bdh << 1) | (bdl >>> 31)) & U32_NOT_COL0) >>> 0; }
+            else                { rl = (((bdl >>> 1) | (bdh << 31)) & U32_NOT_COL7) >>> 0; rh = ((bdh >>> 1) & U32_NOT_COL7) >>> 0; }
+
+            const bsl = (el | (rl & ml)) >>> 0, bsh = (eh | (rh & mh)) >>> 0;
+            if (bsl === 0 && bsh === 0) break;
+            ml = (ml ^ bsl) >>> 0; mh = (mh ^ bsh) >>> 0;
+        }
+
+        let fl, fh;
+        if (dir === 0)      { fl = ((ml >>> 8) | (mh << 24)) >>> 0; fh = mh >>> 8; }
+        else if (dir === 1) { fl = (ml << 8) >>> 0; fh = ((mh << 8) | (ml >>> 24)) >>> 0; }
+        else if (dir === 2) { fl = (((ml >>> 1) | (mh << 31)) & U32_NOT_COL7) >>> 0; fh = ((mh >>> 1) & U32_NOT_COL7) >>> 0; }
+        else                { fl = ((ml << 1) & U32_NOT_COL0) >>> 0; fh = (((mh << 1) | (ml >>> 31)) & U32_NOT_COL0) >>> 0; }
+
+        this._mvLo = (((lo ^ ml) | fl) >>> 0);
+        this._mvHi = (((hi ^ mh) | fh) >>> 0);
+    }
+
     moveBitboard(state, dir) {
         let moving = state; 
         
@@ -363,21 +451,55 @@ class Solver {
                 this.lineInverse[dir][idx] = inverse;
             }
         }
+
+        // Writing a column back into a (lo, hi) pair means scattering eight
+        // bits; predecessors() does that in its innermost loop, so precompute
+        // every (column, line value) contribution once. 8 * 256 entries.
+        this.colInsertLo = [];
+        this.colInsertHi = [];
+        for (let idx = 0; idx < 8; ++idx) {
+            const lo = new Int32Array(256), hi = new Int32Array(256);
+            for (let m = 0; m < 256; ++m) {
+                let l = 0, h = 0;
+                for (let r = 0; r < 4; ++r) if (m & (1 << r)) l |= 1 << (r * 8 + idx);
+                for (let r = 4; r < 8; ++r) if (m & (1 << r)) h |= 1 << ((r - 4) * 8 + idx);
+                lo[m] = l; hi[m] = h;
+            }
+            this.colInsertLo.push(lo);
+            this.colInsertHi.push(hi);
+        }
     }
 
-    // Every state P with moveBitboard(P, dir) === board.
-    predecessors(board, dir) {
-        let results = [0n];
+    // predecessors() on a (lo, hi) pair. Returns a flat [lo0, hi0, lo1, hi1, ...]
+    // array, or null when some line has no possible predecessor.
+    predecessorsLoHi(lo, hi, dir) {
+        const isRow = IS_ROW_LINE[dir];
+        let out = [0, 0];
+
         for (let idx = 0; idx < 8; ++idx) {
-            const options = this.lineInverse[dir][idx][extractLine(board, dir, idx)];
-            if (options.length === 0) return [];
+            const options = this.lineInverse[dir][idx][extractLineU32(lo, hi, dir, idx)];
+            if (options.length === 0) return null;
+
             const next = [];
-            for (const base of results) {
-                for (const opt of options) next.push(insertLine(base, dir, idx, opt));
+            const cLo = isRow ? null : this.colInsertLo[idx];
+            const cHi = isRow ? null : this.colInsertHi[idx];
+            const rowShift = idx < 4 ? idx * 8 : (idx - 4) * 8;
+
+            for (let b = 0; b < out.length; b += 2) {
+                const bl = out[b], bh = out[b + 1];
+                for (let o = 0; o < options.length; ++o) {
+                    const m = options[o];
+                    if (isRow) {
+                        if (idx < 4) next.push((bl | (m << rowShift)) >>> 0, bh);
+                        else next.push(bl, (bh | (m << rowShift)) >>> 0);
+                    } else {
+                        next.push((bl | cLo[m]) >>> 0, (bh | cHi[m]) >>> 0);
+                    }
+                }
             }
-            results = next;
+            out = next;
         }
-        return results;
+        return out;
     }
 
     // Bidirectional BFS. The heuristic is near-useless on boards where blocks
@@ -399,6 +521,7 @@ class Solver {
         let best = Infinity;
         let meetF = -1, meetB = -1;
         let proven = false;
+        let aborted = false;   // deadline hit part-way through a level
 
         while (fFrontier.length && bFrontier.length) {
             // Nothing unexplored can beat `best` once the two depths meet it.
@@ -408,12 +531,26 @@ class Solver {
 
             if (fFrontier.length <= bFrontier.length) {
                 const next = [];
+                let checked = 0;
                 for (const slot of fFrontier) {
-                    const state = F.boardAt(slot);
+                    // Checking only between levels used to overrun the budget by
+                    // however long one level takes, and levels grow ~3x each
+                    // time. Faster expansion reached bigger levels, so the
+                    // overrun grew with it and ate the fallback's share of the
+                    // time. Abandoning a level part-way is safe: the outer loop
+                    // exits with a non-empty frontier, so nothing is reported as
+                    // proven.
+                    if ((++checked & 1023) === 0 && performance.now() > deadline) {
+                        aborted = true;
+                        break;
+                    }
+                    // Read the packed pair straight out of the table; rebuilding
+                    // a BigInt here cost more than the move itself.
+                    const sLo = F.entryLo[slot] >>> 0, sHi = F.entryHi[slot] >>> 0;
                     for (let dir = 0; dir < 4; ++dir) {
-                        const ns = this.moveBitboard(state, dir);
-                        if (ns === state) continue;
-                        const lo = loOf(ns), hi = hiOf(ns);
+                        this.moveLoHi(sLo, sHi, dir);
+                        const lo = this._mvLo, hi = this._mvHi;
+                        if (lo === sLo && hi === sHi) continue;
                         const added = F.add(lo, hi, slot, dir, dF + 1);
                         if (added === -1) continue;
                         next.push(added);
@@ -424,14 +561,22 @@ class Solver {
                         }
                     }
                 }
+                if (aborted) break;
                 fFrontier = next; dF++;
             } else {
                 const next = [];
+                let checked = 0;
                 for (const slot of bFrontier) {
-                    const state = B.boardAt(slot);
+                    if ((++checked & 255) === 0 && performance.now() > deadline) {
+                        aborted = true;
+                        break;
+                    }
+                    const sLo = B.entryLo[slot] >>> 0, sHi = B.entryHi[slot] >>> 0;
                     for (let dir = 0; dir < 4; ++dir) {
-                        for (const p of this.predecessors(state, dir)) {
-                            const lo = loOf(p), hi = hiOf(p);
+                        const preds = this.predecessorsLoHi(sLo, sHi, dir);
+                        if (preds === null) continue;
+                        for (let i = 0; i < preds.length; i += 2) {
+                            const lo = preds[i] >>> 0, hi = preds[i + 1] >>> 0;
                             const added = B.add(lo, hi, slot, dir, dB + 1);
                             if (added === -1) continue;
                             next.push(added);
@@ -443,6 +588,7 @@ class Solver {
                         }
                     }
                 }
+                if (aborted) break;
                 bFrontier = next; dB++;
             }
         }
@@ -488,6 +634,224 @@ class Solver {
         path.reverse();
         states.reverse();
         return { path, states };
+    }
+
+    // One BFS per target, so scoring can reason about which block goes to which
+    // target rather than lumping all targets together. Built on first use: only
+    // beam search needs it, and most boards never reach beam search.
+    ensureTargetDistances() {
+        if (this.distTo) return;
+
+        this.targetCells = [];
+        for (let i = 0; i < 64; ++i) {
+            const bit = i < 32 ? (this.TARGET_LO >>> i) & 1 : (this.TARGET_HI >>> (i - 32)) & 1;
+            if (bit) this.targetCells.push(i);
+        }
+
+        const isWall = (i) => (i < 32 ? (this.WALL_LO >>> i) & 1 : (this.WALL_HI >>> (i - 32)) & 1) === 1;
+        this.distTo = this.targetCells.map(t => {
+            const d = new Int32Array(64).fill(INF);
+            d[t] = 0;
+            const q = [t];
+            for (let head = 0; head < q.length; ++head) {
+                const i = q[head], r = i >> 3, c = i & 7, nd = d[i] + 1;
+                if (r > 0 && !isWall(i - 8) && d[i - 8] > nd) { d[i - 8] = nd; q.push(i - 8); }
+                if (r < 7 && !isWall(i + 8) && d[i + 8] > nd) { d[i + 8] = nd; q.push(i + 8); }
+                if (c > 0 && !isWall(i - 1) && d[i - 1] > nd) { d[i - 1] = nd; q.push(i - 1); }
+                if (c < 7 && !isWall(i + 1) && d[i + 1] > nd) { d[i + 1] = nd; q.push(i + 1); }
+            }
+            return d;
+        });
+
+        // Reused across the millions of calls below rather than reallocated.
+        this._scoreBlocks = new Int32Array(64);
+        this._scoreUsedB = new Uint8Array(64);
+        this._scoreUsedT = new Uint8Array(this.targetCells.length);
+    }
+
+    // How promising a position looks. Not admissible and not used by any exact
+    // search - beam search only needs an ordering, not a bound.
+    //
+    // Greedily matches each block to a distinct target and sums the distances.
+    // The distinctness is the whole point: scoring by "distance to the nearest
+    // target" lets every block claim the same target, reads a pile of blocks on
+    // one square as nearly solved, and steers the beam straight into that trap.
+    // Measured on the 16-block board, this pays for its ~250 extra operations
+    // many times over - it beat the nearest-target score running at fifty times
+    // the beam width.
+    beamScore(lo, hi) {
+        const blocks = this._scoreBlocks;
+        let n = 0;
+        let x = lo;
+        while (x !== 0) { blocks[n++] = 31 - Math.clz32(x & -x); x &= x - 1; }
+        x = hi;
+        while (x !== 0) { blocks[n++] = 32 + (31 - Math.clz32(x & -x)); x &= x - 1; }
+
+        const distTo = this.distTo, m = distTo.length;
+        if (n === 0 || m === 0) return 0;
+
+        // The greedy is O(pairs * n * m). Daily puzzles top out around 16 blocks;
+        // a hand-drawn board can be far denser, where that cost would starve the
+        // search of states. Fall back to the cheaper target-centric sum there.
+        if (n * m > 400) {
+            let total = 0;
+            for (let j = 0; j < m; ++j) {
+                const dt = distTo[j];
+                let best = INF;
+                for (let i = 0; i < n; ++i) { const d = dt[blocks[i]]; if (d < best) best = d; }
+                total += best >= INF ? 64 : best;
+            }
+            return total;
+        }
+
+        const usedB = this._scoreUsedB, usedT = this._scoreUsedT;
+        usedB.fill(0, 0, n); usedT.fill(0, 0, m);
+
+        let total = 0;
+        const pairs = n < m ? n : m;
+        for (let k = 0; k < pairs; ++k) {
+            let bestD = INF, bi = -1, tj = -1;
+            for (let j = 0; j < m; ++j) {
+                if (usedT[j]) continue;
+                const dt = distTo[j];
+                for (let i = 0; i < n; ++i) {
+                    if (usedB[i]) continue;
+                    const d = dt[blocks[i]];
+                    if (d < bestD) { bestD = d; bi = i; tj = j; }
+                }
+            }
+            if (bi < 0) break;
+            usedB[bi] = 1; usedT[tj] = 1;
+            // Unreachable pairings still have to cost more than any real one.
+            total += bestD >= INF ? 64 : bestD;
+        }
+        return total;
+    }
+
+    // Breadth-first, but only the `width` most promising positions survive each
+    // level. That forfeits any optimality guarantee - the answer can be longer
+    // than the true minimum - in exchange for reaching depths the exact search
+    // cannot: the frontier stays flat instead of multiplying by ~3 per level.
+    //
+    // Used only when the exact search has already given up, so a longer solution
+    // is being compared against no solution at all.
+    // `randomFraction` of each level's survivors are drawn at random from the
+    // positions that missed the score cut, rather than taken in score order.
+    // Pure greedy selection collapses the beam: every survivor ends up a near
+    // duplicate of the same few ancestors, and the whole level walks into the
+    // same dead end together. Measured on the 16-block board at width 5000,
+    // keeping half at random moved the average result from 39 steps to 36.8 and
+    // the best from 39 to 34 (par is 33); a quarter at random changed nothing,
+    // so the perturbation has to be substantial to escape.
+    //
+    // `seed` keeps it reproducible: the same board and seed always give the same
+    // answer, and the caller varies the seed across rounds to sample more of the
+    // distribution rather than to gamble.
+    beamSearch({ width, deadline, maxStates, randomFraction = 0.5, seed = 1, onProgress = null }) {
+        if (this.START_LO === this.TARGET_LO && this.START_HI === this.TARGET_HI) {
+            return { status: 'solved', path: [], states: [this.start_state] };
+        }
+        this.ensureTargetDistances();
+
+        const T = new StateTable();
+        let frontier = [T.add(this.START_LO, this.START_HI, -1, 255, 0)];
+
+        // Scores are small integers, so selecting the best `width` is a counting
+        // sort rather than an O(n log n) sort of up to 4*width candidates.
+        const SCORE_CAP = 4096;
+        const counts = new Int32Array(SCORE_CAP + 1);
+
+        // Seeded so a board always solves the same way; Math.random would make
+        // the same puzzle give a different answer on every click.
+        let rngState = (seed >>> 0) || 1;
+        const rand = () => {
+            rngState = (Math.imul(rngState, 1103515245) + 12345) >>> 0;
+            return rngState / 4294967296;
+        };
+
+        for (let depth = 1; depth <= 200; ++depth) {
+            if (performance.now() > deadline) return { status: 'timeout' };
+            if (T.size > maxStates) return { status: 'timeout', reason: 'memory' };
+            if (onProgress) onProgress(T.size);
+
+            const slots = [], scores = [];
+            for (let f = 0; f < frontier.length; ++f) {
+                const slot = frontier[f];
+                const sLo = T.entryLo[slot] >>> 0, sHi = T.entryHi[slot] >>> 0;
+                for (let dir = 0; dir < 4; ++dir) {
+                    this.moveLoHi(sLo, sHi, dir);
+                    const lo = this._mvLo, hi = this._mvHi;
+                    if (lo === sLo && hi === sHi) continue;
+
+                    // The table dedupes globally, so no position is ever expanded
+                    // twice and the search cannot cycle.
+                    const added = T.add(lo, hi, slot, dir, depth & 255);
+                    if (added === -1) continue;
+                    if (lo === this.TARGET_LO && hi === this.TARGET_HI) {
+                        return this.reconstructFromTable(T, added);
+                    }
+                    let s = this.beamScore(lo, hi);
+                    if (s > SCORE_CAP) s = SCORE_CAP;
+                    slots.push(added); scores.push(s);
+                }
+            }
+            if (slots.length === 0) return { status: 'exhausted' };
+
+            if (slots.length <= width) {
+                frontier = slots;
+                continue;
+            }
+
+            const nRandom = Math.min(Math.floor(width * randomFraction), slots.length - width);
+            const nTop = width - nRandom;
+
+            counts.fill(0);
+            for (let i = 0; i < scores.length; ++i) counts[scores[i]]++;
+            // Walk scores upward until `nTop` positions have been claimed.
+            let cutoff = 0, taken = 0;
+            while (cutoff <= SCORE_CAP && taken + counts[cutoff] <= nTop) {
+                taken += counts[cutoff]; cutoff++;
+            }
+            let spare = nTop - taken;   // partial room at the cutoff score
+
+            // Reservoir sampling over the ones that missed the cut, so the pool
+            // never has to be materialised.
+            const next = [];
+            const reservoir = [];
+            let poolSeen = 0;
+            for (let i = 0; i < slots.length; ++i) {
+                const s = scores[i];
+                if (s < cutoff) { next.push(slots[i]); continue; }
+                if (s === cutoff && spare > 0) { next.push(slots[i]); spare--; continue; }
+                if (nRandom === 0) continue;
+                poolSeen++;
+                if (reservoir.length < nRandom) reservoir.push(slots[i]);
+                else {
+                    const j = Math.floor(rand() * poolSeen);
+                    if (j < nRandom) reservoir[j] = slots[i];
+                }
+            }
+            for (let i = 0; i < reservoir.length; ++i) next.push(reservoir[i]);
+            frontier = next;
+        }
+        return { status: 'timeout', reason: 'depth' };
+    }
+
+    // Walks StateTable parent pointers back to the start.
+    reconstructFromTable(T, slot) {
+        const path = [];
+        for (let s = slot; T.entryParent[s] !== -1; s = T.entryParent[s]) {
+            path.push(DIR_CHARS[T.entryMove[s]]);
+        }
+        path.reverse();
+
+        const states = [this.start_state];
+        let cur = this.start_state;
+        for (const mv of path) {
+            cur = this.moveBitboard(cur, DIR_CHARS.indexOf(mv));
+            states.push(cur);
+        }
+        return { status: 'solved', path, states };
     }
 
     // Single A* run. `weight` inflates the heuristic (f = g + weight*h):
@@ -572,11 +936,25 @@ class Solver {
             maxStates = 2000000,
             totalTimeBudgetMs = 15000,
             weights = [12, 6, 3, 2, 1],
+            beamWidth = 0,
             onProgress = null
         } = options;
 
         const overallStart = performance.now();
-        const endTime = overallStart + totalTimeBudgetMs;
+        // Thorough passes Infinity: search until the state cap is reached rather
+        // than stopping on a clock. Every deadline below has to stay Infinity in
+        // that case - `start + Infinity - Infinity` is NaN, and a NaN deadline
+        // compares false against everything, which would silently disable the
+        // limit checks instead of removing them.
+        const untimed = !isFinite(totalTimeBudgetMs);
+
+        // With best-effort enabled, hold back part of the budget so the beam
+        // pass still has time to run once the exact phases have used theirs.
+        // Carved off the exact search only because it is about to fail anyway:
+        // whenever it succeeds it does so in a fraction of the budget.
+        const beamReserveMs = (beamWidth > 0 && !untimed) ? totalTimeBudgetMs * 0.4 : 0;
+        const exactBudgetMs = totalTimeBudgetMs - beamReserveMs;
+        const endTime = untimed ? Infinity : overallStart + exactBudgetMs;
         let nodesExplored = 0;
         let best = null;
         let lastReason = 'time';
@@ -593,14 +971,14 @@ class Solver {
         // A* passes below still have time to produce an approximate answer.
         const bidi = this.solveBidirectional({
             maxStates,
-            deadline: overallStart + totalTimeBudgetMs * 0.7,
+            deadline: untimed ? Infinity : overallStart + exactBudgetMs * 0.7,
             onProgress
         });
         if (bidi.status === 'solved' && bidi.optimal) {
             return {
                 success: true,
                 optimal: true,
-                message: `Optimal solution in ${bidi.path.length} steps`,
+                message: `Optimal solution in ${plural(bidi.path.length, 'step')}`,
                 path: bidi.path,
                 states: bidi.states
             };
@@ -643,7 +1021,7 @@ class Solver {
                     return {
                         success: true,
                         optimal: true,
-                        message: `Optimal solution in ${best.path.length} steps`,
+                        message: `Optimal solution in ${plural(best.path.length, 'step')}`,
                         path: best.path,
                         states: best.states
                     };
@@ -658,10 +1036,91 @@ class Solver {
                     return {
                         success: true,
                         optimal: true,
-                        message: `Optimal solution in ${path.length} steps`,
+                        message: `Optimal solution in ${plural(path.length, 'step')}`,
                         path,
                         states
                     };
+                }
+            }
+        }
+
+        // Last resort: give up on proving anything and just look for a solution.
+        // Runs even when `best` already holds one, since the beam routinely
+        // reaches goals the weighted passes never got near.
+        //
+        // Two phases, both keeping only the shortest answer seen.
+        //
+        // First the width escalates from a small opening pass. Cost scales with
+        // width, so a run costs about as much as everything before it combined:
+        // securing a rough answer early is nearly free, whereas opening at the
+        // maximum width risks a single pass too large for the budget, which
+        // returns nothing at all.
+        //
+        // Once the width cap is reached the rounds repeat at that width with a
+        // fresh seed. Beyond a few tens of thousands the width stops mattering,
+        // while the random survivors make each round an independent sample:
+        // eight seeds at one width on the 16-block board spanned 34-40 steps,
+        // and on another spanned 24-27. Drawing again is worth more than
+        // widening, so extra budget buys samples rather than beam.
+        if (beamWidth > 0) {
+            const beamDeadline = untimed ? Infinity : performance.now() + beamReserveMs;
+            // Starts small enough that even the shortest reserve (Fast reserves
+            // ~1.2s) completes a full pass; scoring is expensive enough that a
+            // wider opening round returned nothing at all on that budget.
+            // min() so a beamWidth below the opening width still runs a pass
+            // rather than skipping the loop entirely.
+            let width = Math.min(500, beamWidth);
+            let round = 0;
+            let sinceGain = 0;   // rounds since the answer last got shorter
+            // Results at a fixed width scatter by several steps between seeds,
+            // so a couple of flat rounds does not mean the well is dry. Thorough
+            // has no clock to respect, so it keeps drawing for longer.
+            const stallLimit = untimed ? 5 : 3;
+            while (width <= beamWidth) {
+                const roundStart = performance.now();
+                if (roundStart >= beamDeadline) break;
+
+                const beam = this.beamSearch({
+                    width,
+                    maxStates,
+                    deadline: beamDeadline,
+                    // Random survivors make each round an independent sample, so
+                    // rounds differ by more than width alone and the best of
+                    // them is kept below.
+                    seed: ++round,
+                    onProgress: onProgress ? (n) => onProgress(nodesExplored + n) : null
+                });
+                if (beam.status === 'solved' && (!best || beam.path.length < best.path.length)) {
+                    best = { path: beam.path, states: beam.states };
+                    sinceGain = 0;
+                } else {
+                    sinceGain++;
+                }
+                // Nothing left to widen into: the whole reachable space was seen.
+                if (beam.status === 'exhausted') break;
+
+                // Cost grows about linearly with width, so size the next round
+                // from what this one actually took. Jumping a fixed 4x either
+                // overshot the reserve and wasted the round, or stopped early
+                // and left time unused.
+                const spent = Math.max(1, performance.now() - roundStart);
+                const affordable = Math.floor((beamDeadline - performance.now()) / spent);
+                if (affordable < 2) break;
+
+                if (width < beamWidth) {
+                    const wider = Math.min(beamWidth, width * Math.min(4, affordable));
+                    // Widening rounds are narrow and routinely lose to whatever
+                    // the exact search already found, so they run the stall
+                    // counter up before sampling has drawn anything. Reset on
+                    // the way in, or the loop exits at the cap having taken
+                    // exactly one sample - which is how a reachable shorter
+                    // answer went unseen.
+                    if (wider >= beamWidth) sinceGain = 0;
+                    width = wider;
+                } else if (round >= MAX_BEAM_ROUNDS || sinceGain >= stallLimit) {
+                    // Re-sampling has stopped paying. With an unlimited budget
+                    // this is what ends the loop; the round cap is the backstop.
+                    break;
                 }
             }
         }
@@ -670,7 +1129,7 @@ class Solver {
             return {
                 success: true,
                 optimal: false,
-                message: `Approximate solution in ${best.path.length} steps (not guaranteed minimal)`,
+                message: `Found a ${best.path.length}-step solution (not proven shortest)`,
                 path: best.path,
                 states: best.states
             };
@@ -682,10 +1141,14 @@ class Solver {
         const limitHint = lastReason === 'memory'
             ? 'hit the memory limit'
             : `ran out of time after ${elapsed}ms`;
+        // Point at whichever lever is still untried.
+        const advice = beamWidth > 0
+            ? 'try a higher search strength.'
+            : 'try a higher search strength, or turn on Best effort.';
         return {
             success: false,
             exhausted: false,
-            message: `Gave up: ${limitHint} (~${nodesExplored} nodes). A solution may still exist - try a higher search strength.`,
+            message: `Gave up: ${limitHint} (~${nodesExplored} nodes). A solution may still exist - ${advice}`,
             path: [],
             states: []
         };

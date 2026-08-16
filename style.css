@@ -351,6 +351,78 @@ h2, h3 {
     gap: 0.5rem;
 }
 
+.switch-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    margin-top: 1rem;
+    cursor: pointer;
+}
+
+/* Kept in the accessibility tree and focusable; the track below is the visible
+   control. */
+.switch-input {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.switch-track {
+    flex-shrink: 0;
+    width: 34px;
+    height: 20px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.12);
+    border: 1px solid var(--border-color);
+    position: relative;
+    transition: background 0.2s ease;
+    margin-top: 0.1rem;
+}
+
+.switch-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--text-secondary);
+    transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.switch-input:checked + .switch-track {
+    background: var(--primary-color);
+    border-color: var(--primary-color);
+}
+
+.switch-input:checked + .switch-track .switch-thumb {
+    background: #000;
+    transform: translateX(14px);
+}
+
+.switch-input:focus-visible + .switch-track {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+}
+
+.switch-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+.switch-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+}
+
+.switch-desc {
+    font-size: 0.72rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+}
+
 .strength-note {
     font-size: 0.75rem;
     line-height: 1.5;
@@ -440,6 +512,15 @@ h2, h3 {
     font-size: 0.95rem;
     color: var(--text-secondary);
     min-height: 24px;
+}
+
+.solver-stats {
+    /* Ticks about ten times a second, so the digits must not shift the line. */
+    font-variant-numeric: tabular-nums;
+    font-size: 0.78rem !important;
+    color: var(--text-secondary);
+    min-height: 1.2em !important;
+    margin-top: 0.35rem;
 }
 
 .hidden {
